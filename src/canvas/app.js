@@ -69,6 +69,9 @@ let stage,
   toastTimer;
 let cardMenuOpen = false,
   toolsSelection = '';
+let fileImportCandidate = null,
+  fileReadTicket = 0,
+  fileImportActive = false;
 const histories = createHistory();
 const board = () => workspace.boards.find((b) => b.id === workspace.activeId);
 const activeNode = () =>
@@ -214,6 +217,7 @@ function closeMenus() {
   $('#card-more')?.setAttribute('aria-expanded', 'false');
   $('#board-menu')?.setAttribute('hidden', '');
   $('#board-menu-toggle')?.setAttribute('aria-expanded', 'false');
+  closeFileMenu();
 }
 function toggleBoardMenu() {
   finishEdit();
@@ -285,7 +289,43 @@ function build() {
       'div',
       { class: 'top-actions' },
       h('span', { id: 'save-state', class: 'save-state', role: 'status' }),
-      button('文件', showFiles, 'ghost small'),
+      h(
+        'div',
+        { id: 'file-picker', class: 'file-picker' },
+        button('文件', toggleFileMenu, 'ghost small', {
+          id: 'file-menu-toggle',
+          'aria-expanded': 'false',
+          'aria-controls': 'file-menu'
+        }),
+        h(
+          'div',
+          {
+            id: 'file-menu',
+            class: 'file-menu popup-menu',
+            hidden: true,
+            'aria-label': '文件与备份'
+          },
+          button('导出当前画布', () => exportFromMenu(false)),
+          button('备份全部画布', () => exportFromMenu(true)),
+          button('导入 JSON…', chooseImportFile, '', {
+            id: 'file-import-trigger'
+          }),
+          h('input', {
+            id: 'file-import-input',
+            type: 'file',
+            accept: '.json,application/json',
+            hidden: true,
+            'aria-label': '选择画布 JSON 备份',
+            onChange: readImportFile,
+            onCancel: cancelFileImport
+          }),
+          h('div', {
+            id: 'file-import-panel',
+            class: 'file-import-panel',
+            hidden: true
+          })
+        )
+      ),
       button('帮助', toggleHelp, 'ghost small')
     )
   );
@@ -1090,105 +1130,139 @@ function backup(all = true) {
     note(`导出失败：${e.message}`);
   }
 }
-function showFiles() {
+function resetFileImport() {
+  fileReadTicket++;
+  fileImportCandidate = null;
+  fileImportActive = false;
+  const input = $('#file-import-input'),
+    panel = $('#file-import-panel');
+  if (input) input.value = '';
+  if (panel) {
+    panel.hidden = true;
+    panel.replaceChildren();
+  }
+}
+function closeFileMenu() {
+  $('#file-menu')?.setAttribute('hidden', '');
+  $('#file-menu-toggle')?.setAttribute('aria-expanded', 'false');
+  resetFileImport();
+}
+function toggleFileMenu() {
   finishEdit();
+  const opening = $('#file-menu').hidden;
   closeMenus();
   cancelConnect();
-  let candidate = null,
-    readTicket = 0;
-  const error = h('div', { class: 'error-text', role: 'alert' }),
-    preview = h('div'),
-    confirm = button(
-      '作为新画布导入',
-      () => {
-        const r = importAppend(workspace, candidate);
-        if (!r.ok) {
-          error.textContent = r.errors.join('；');
-          return;
-        }
-        workspace = r.workspace;
-        selection = null;
-        cancelConnect();
-        markDirty();
-        updateBoardMenu();
-        renderBoard();
-        fitAll();
-        d.close();
-        note('已追加导入，已有画布保留。');
-      },
-      'primary',
-      { disabled: true }
-    );
-  const file = h('input', {
-    type: 'file',
-    accept: '.json,application/json',
-    'aria-label': '选择画布 JSON 备份',
-    onChange: async (e) => {
-      const ticket = ++readTicket;
-      candidate = null;
-      confirm.disabled = true;
-      preview.replaceChildren();
-      error.textContent = '';
-      const f = e.target.files[0];
-      if (!f) return;
-      if (f.size > LIMITS.chars * 3) {
-        error.textContent = '备份文件超过大小上限。';
-        return;
-      }
-      try {
-        const text = await f.text();
-        if (ticket !== readTicket) return;
-        const r = parseImport(text);
-        if (!r.ok) {
-          error.textContent = r.errors.join('；');
-          return;
-        }
-        candidate = r.value;
-        confirm.disabled = false;
-        preview.replaceChildren(
-          h(
-            'div',
-            { class: 'import-preview' },
-            '将追加导入：',
-            candidate.boards.map((b) =>
-              h(
-                'div',
-                {},
-                `${b.title || '未命名画布'} · ${b.nodes.length} 张卡片`
-              )
-            )
-          )
-        );
-      } catch {
-        if (ticket === readTicket) error.textContent = '文件读取失败。';
-      }
-    }
-  });
-  const d = modal(
-    '画布文件',
+  $('#file-menu').hidden = !opening;
+  $('#file-menu-toggle').setAttribute('aria-expanded', String(opening));
+  if (opening) $('#file-menu button')?.focus();
+}
+function exportFromMenu(all) {
+  closeMenus();
+  backup(all);
+  $('#file-menu-toggle').focus();
+}
+function cancelFileImport() {
+  resetFileImport();
+  if (!$('#file-menu').hidden) $('#file-import-trigger').focus();
+}
+function showFileImport(message, error = false, fileName = '') {
+  const panel = $('#file-import-panel');
+  panel.hidden = false;
+  panel.replaceChildren(
     h(
-      'p',
-      {},
-      '内容自动保存在当前浏览器。JSON 用于备份和迁移，导入会追加新画布。'
+      'div',
+      {
+        class: `file-import-status${error ? ' error' : ''}`,
+        role: error ? 'alert' : 'status'
+      },
+      message
     ),
-    button(
-      ['导出当前画布', h('small', {}, '包含卡片、位置、颜色和所有连接。')],
-      () => backup(false),
-      'export-item'
-    ),
-    button(
-      [
-        '备份全部画布',
-        h('small', {}, `共 ${workspace.boards.length} 张画布。`)
-      ],
-      () => backup(true),
-      'export-item'
-    ),
-    h('div', { style: 'margin-top:24px' }, file),
-    error,
-    preview,
-    h('div', { class: 'actions' }, confirm)
+    fileName
+      ? h(
+          'div',
+          { class: 'file-import-summary' },
+          h('div', {}, fileName),
+          fileImportCandidate
+            ? [
+                h(
+                  'p',
+                  {},
+                  `将追加 ${fileImportCandidate.boards.length} 张画布，保留已有内容。`
+                ),
+                fileImportCandidate.boards.map((b) =>
+                  h(
+                    'div',
+                    {},
+                    `${b.title || '未命名画布'} · ${b.nodes.length} 张卡片`
+                  )
+                )
+              ]
+            : null
+        )
+      : null,
+    h(
+      'div',
+      { class: 'file-import-actions' },
+      button('追加导入', appendFileImport, 'primary', {
+        disabled: !fileImportCandidate
+      }),
+      button('取消', cancelFileImport, 'ghost')
+    )
   );
+}
+function chooseImportFile() {
+  resetFileImport();
+  fileImportActive = true;
+  $('#file-import-input').click();
+}
+async function readImportFile(e) {
+  if ($('#file-menu').hidden) return;
+  const ticket = ++fileReadTicket,
+    file = e.target.files[0];
+  fileImportCandidate = null;
+  if (!file) return cancelFileImport();
+  fileImportActive = true;
+  showFileImport('正在读取…', false, file.name);
+  if (file.size > LIMITS.chars * 3) {
+    showFileImport('备份文件超过大小上限。', true, file.name);
+    return;
+  }
+  try {
+    const text = await file.text();
+    if (ticket !== fileReadTicket) return;
+    const result = parseImport(text);
+    if (!result.ok) {
+      showFileImport(result.errors.join('；'), true, file.name);
+      return;
+    }
+    fileImportCandidate = result.value;
+    showFileImport('备份已就绪', false, file.name);
+  } catch {
+    if (ticket === fileReadTicket)
+      showFileImport('文件读取失败。', true, file.name);
+  }
+}
+function appendFileImport() {
+  if (!fileImportCandidate) return;
+  finishEdit();
+  const result = importAppend(workspace, fileImportCandidate);
+  if (!result.ok) {
+    const fileName = $('#file-import-input').files[0]?.name || '';
+    fileImportCandidate = null;
+    showFileImport(result.errors.join('；'), true, fileName);
+    $('#file-import-trigger').focus();
+    return;
+  }
+  closeMenus();
+  workspace = result.workspace;
+  selection = null;
+  cancelConnect();
+  markDirty();
+  updateBoardMenu();
+  renderBoard();
+  fitAll();
+  stage.focus();
+  note('已追加导入，已有画布保留。');
 }
 function removeBoard() {
   finishEdit();
@@ -1327,6 +1401,7 @@ function showRecovery() {
   );
 }
 document.addEventListener('pointerdown', (e) => {
+  if (!e.target.closest('#file-picker')) closeFileMenu();
   if (!e.target.closest('#board-picker')) {
     $('#board-menu')?.setAttribute('hidden', '');
     $('#board-menu-toggle')?.setAttribute('aria-expanded', 'false');
@@ -1349,11 +1424,14 @@ document.addEventListener('keydown', (e) => {
     'textarea,input,select,[contenteditable=true]'
   );
   if (e.key === 'Escape') {
-    const focusBack = !$('#board-menu').hidden
-      ? '#board-menu-toggle'
-      : cardMenuOpen
-        ? '#card-more'
-        : null;
+    e.preventDefault();
+    const focusBack = !$('#file-menu').hidden
+      ? '#file-menu-toggle'
+      : !$('#board-menu').hidden
+        ? '#board-menu-toggle'
+        : cardMenuOpen
+          ? '#card-more'
+          : null;
     closeMenus();
     finishEdit();
     cancelConnect();
@@ -1361,7 +1439,7 @@ document.addEventListener('keydown', (e) => {
     ($(focusBack || '#stage') || stage).focus();
     return;
   }
-  if (typing) return;
+  if (typing || !$('#file-menu').hidden) return;
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
     e.preventDefault();
     undo(e.shiftKey);
@@ -1392,6 +1470,7 @@ window.addEventListener('storage', (e) => {
     dirty ||
     editing ||
     dragging ||
+    fileImportActive ||
     document.querySelector('dialog[open]') ||
     corrupt ||
     conflict

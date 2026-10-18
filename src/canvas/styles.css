@@ -212,6 +212,54 @@ a {
   align-items: center;
   gap: 5px;
 }
+.file-picker {
+  position: relative;
+  flex: none;
+}
+#file-menu-toggle[aria-expanded='true'] {
+  background: #eef5eb;
+}
+.file-menu {
+  top: calc(100% + 8px);
+  right: 0;
+  width: 296px;
+  max-width: calc(100vw - 24px);
+  overscroll-behavior: contain;
+}
+.file-import-panel {
+  margin: 6px 4px 2px;
+  padding: 12px 6px 4px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.file-import-status {
+  color: #6e8068;
+  white-space: pre-wrap;
+}
+.file-import-status.error {
+  color: #a25342;
+}
+.file-import-summary {
+  margin-top: 8px;
+  padding: 9px 10px;
+  background: #f3f6ee;
+  border-radius: 7px;
+  white-space: pre-wrap;
+}
+.file-import-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+.file-import-actions button {
+  min-height: 34px;
+  padding: 7px 10px;
+  font-size: 12px;
+  white-space: normal;
+}
 .save-state {
   font-size: 10px;
   color: var(--muted);
@@ -645,31 +693,11 @@ dialog input[type='text'] {
   border-radius: 8px;
   outline-color: #a5c398;
 }
-dialog input[type='file'] {
-  max-width: 100%;
-  font-size: 12px;
-}
 dialog .actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
   margin-top: 22px;
-}
-.import-preview {
-  background: #eff4e9;
-  padding: 13px;
-  border-radius: 8px;
-  font-size: 12px;
-  margin-top: 16px;
-  line-height: 1.9;
-  max-height: 220px;
-  overflow: auto;
-}
-.error-text {
-  color: #a25342;
-  font-size: 11px;
-  white-space: pre-wrap;
-  margin-top: 14px;
 }
 .dialog-x {
   float: right;
@@ -694,20 +722,6 @@ dialog .actions {
 }
 .empty-guide button {
   pointer-events: auto;
-}
-.export-item {
-  display: block;
-  text-align: left;
-  width: 100%;
-  padding: 14px;
-  margin-top: 10px;
-  font-size: 13px;
-}
-.export-item small {
-  display: block;
-  font-size: 11px;
-  color: #8b9882;
-  margin-top: 3px;
 }
 @media (max-width: 1000px) {
   .topbar {
@@ -763,10 +777,14 @@ dialog .actions {
     flex: 1;
     justify-content: flex-end;
   }
-  .top-actions button {
+  .top-actions > button,
+  #file-menu-toggle {
     min-height: 34px;
     padding: 7px 8px;
     font-size: 12px;
+  }
+  .file-menu {
+    max-height: calc(100dvh - 150px);
   }
   .save-state {
     max-width: 160px;
@@ -805,8 +823,15 @@ dialog .actions {
   .toolbar button {
     padding-inline: 8px;
   }
-  .top-actions > button {
+  .top-actions > button,
+  .file-picker {
     order: 3;
+  }
+  .file-picker {
+    position: static;
+  }
+  .file-menu {
+    right: 12px;
   }
   .save-state {
     order: 4;
