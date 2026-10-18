@@ -40,7 +40,7 @@ export function createBoard(title = '未命名画布') {
     title,
     createdAt: now,
     updatedAt: now,
-    nodes: [createNode('我想想清楚的问题')],
+    nodes: [createNode()],
     edges: [],
     view: { x: 0, y: 0, scale: 1 }
   };

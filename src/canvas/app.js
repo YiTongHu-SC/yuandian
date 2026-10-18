@@ -67,6 +67,8 @@ let stage,
   nodesLayer,
   nodeEls = new Map(),
   toastTimer;
+let cardMenuOpen = false,
+  toolsSelection = '';
 const histories = createHistory();
 const board = () => workspace.boards.find((b) => b.id === workspace.activeId);
 const activeNode = () =>
@@ -104,7 +106,7 @@ function status() {
     : conflict
       ? '另一页有更新，保存已暂停'
       : saveError;
-  el.textContent = err || (dirty ? '正在保存…' : '● 已自动保存在本机');
+  el.textContent = err || (dirty ? '正在保存…' : '已保存 · 本机');
   el.title = err || '记录属于当前浏览器，请定期导出 JSON';
   el.className = `save-state${err ? ' error' : ''}`;
 }
@@ -170,84 +172,76 @@ function optionLabel(b) {
   const same = workspace.boards.filter((x) => x.title === b.title);
   return `${b.title || '未命名画布'}${same.length > 1 ? ` · ${same.indexOf(b) + 1}/${same.length}` : ''}`;
 }
-function updateBoardSelect() {
-  const el = $('#boards');
+function updateBoardMenu() {
+  const el = $('#board-menu');
+  if (!el) return;
   el.replaceChildren(
     ...workspace.boards.map((b) =>
-      h(
-        'option',
-        { value: b.id, selected: b.id === workspace.activeId },
-        optionLabel(b)
+      button(
+        optionLabel(b),
+        () => {
+          finishEdit();
+          workspace.activeId = b.id;
+          selection = null;
+          closeMenus();
+          cancelConnect();
+          markDirty();
+          renderBoard();
+          stage.focus();
+        },
+        `board-entry${b.id === workspace.activeId ? ' current' : ''}`,
+        {
+          'aria-label': `切换到画布：${optionLabel(b)}`,
+          'aria-current': b.id === workspace.activeId ? 'true' : null
+        }
       )
+    ),
+    h('hr'),
+    button('＋ 新画布', newBoard),
+    button(
+      '删除当前画布…',
+      () => {
+        closeMenus();
+        removeBoard();
+      },
+      'danger'
     )
   );
 }
+function closeMenus() {
+  cardMenuOpen = false;
+  $('#card-menu')?.setAttribute('hidden', '');
+  $('#card-more')?.setAttribute('aria-expanded', 'false');
+  $('#board-menu')?.setAttribute('hidden', '');
+  $('#board-menu-toggle')?.setAttribute('aria-expanded', 'false');
+}
+function toggleBoardMenu() {
+  finishEdit();
+  const opening = $('#board-menu').hidden;
+  closeMenus();
+  updateBoardMenu();
+  $('#board-menu').hidden = !opening;
+  $('#board-menu-toggle').setAttribute('aria-expanded', String(opening));
+  if (opening) $('#board-menu button')?.focus();
+}
 function build() {
-  const top = h(
-    'header',
-    { class: 'topbar' },
-    h(
-      'div',
-      { class: 'brand' },
-      h('div', { class: 'brand-mark', 'aria-hidden': 'true' }, '·'),
-      h(
-        'div',
-        {},
-        h('div', { class: 'brand-name' }, '原点'),
-        h('div', { class: 'brand-sub' }, '自由思考 / OPEN CANVAS')
-      )
-    ),
-    h('span', { class: 'version-tag' }, '初版'),
-    h('div', { class: 'top-divider' }),
-    h('select', {
-      id: 'boards',
-      class: 'board-select',
-      'aria-label': '切换画布',
-      onChange: (e) => {
-        finishEdit();
-        workspace.activeId = e.target.value;
-        selection = null;
-        cancelConnect();
-        markDirty();
-        renderBoard();
-      }
-    }),
-    button('＋ 新画布', newBoard, 'ghost small'),
-    h('div', { class: 'top-grow' }),
-    h(
-      'div',
-      { class: 'top-actions' },
-      h('span', { id: 'save-state', class: 'save-state', role: 'status' }),
-      button('文件', showFiles, 'ghost small'),
-      button('怎么用', toggleHelp, 'ghost small')
-    )
-  );
-  stage = h('div', {
-    class: 'stage',
-    id: 'stage',
-    tabindex: '0',
-    'aria-label': '自由思考画布，双击空白处新增想法'
+  const title = h('input', {
+    id: 'board-title',
+    class: 'title-input',
+    type: 'text',
+    maxlength: LIMITS.title,
+    'aria-label': '画布名称',
+    title: '点击修改画布名称',
+    onFocus: closeMenus,
+    onInput: (e) => {
+      board().title = e.target.value;
+      markDirty();
+    }
   });
-  world = h('div', { class: 'world' });
-  svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svg.classList.add('edges');
-  svg.setAttribute('aria-label', '想法之间的连接');
-  nodesLayer = h('div', { class: 'nodes' });
-  world.append(svg, nodesLayer);
-  stage.append(world);
   const toolbar = h(
     'div',
-    { class: 'toolbar floating' },
-    button('＋ 想法', () => addIdea(), 'primary', { 'aria-label': '新增想法' }),
-    button('＋ 分支', () => addBranch(), '', {
-      id: 'branch',
-      'aria-label': '添加分支'
-    }),
-    button('连线', toggleConnect, '', {
-      id: 'connect',
-      'aria-label': '连接想法'
-    }),
-    h('div', { class: 'sep' }),
+    { class: 'toolbar', 'aria-label': '画布操作' },
+    button('＋ 卡片', () => addIdea(), 'primary', { 'aria-label': '新增卡片' }),
     button('↶', () => undo(), '', {
       id: 'undo',
       title: '撤销 Ctrl / ⌘ Z',
@@ -259,52 +253,68 @@ function build() {
       'aria-label': '重做'
     })
   );
-  const title = h('input', {
-    id: 'board-title',
-    class: 'title-input',
-    type: 'text',
-    maxlength: LIMITS.title,
-    'aria-label': '画布名称',
-    onInput: (e) => {
-      board().title = e.target.value;
-      markDirty();
-    },
-    onBlur: updateBoardSelect
+  const top = h(
+    'header',
+    { class: 'topbar' },
+    h(
+      'div',
+      { class: 'brand' },
+      h('div', { class: 'brand-mark', 'aria-hidden': 'true' }, '·'),
+      h('div', { class: 'brand-name' }, '原点')
+    ),
+    h(
+      'div',
+      { class: 'board-picker', id: 'board-picker' },
+      title,
+      button('⌄', toggleBoardMenu, 'ghost small', {
+        id: 'board-menu-toggle',
+        'aria-label': '画布菜单',
+        'aria-expanded': 'false',
+        'aria-controls': 'board-menu'
+      }),
+      h('div', {
+        id: 'board-menu',
+        class: 'board-menu popup-menu',
+        hidden: true,
+        'aria-label': '切换与管理画布'
+      })
+    ),
+    h('div', { class: 'top-grow' }),
+    toolbar,
+    h(
+      'div',
+      { class: 'top-actions' },
+      h('span', { id: 'save-state', class: 'save-state', role: 'status' }),
+      button('文件', showFiles, 'ghost small'),
+      button('帮助', toggleHelp, 'ghost small')
+    )
+  );
+  stage = h('div', {
+    class: 'stage',
+    id: 'stage',
+    tabindex: '0',
+    'aria-label': '自由思考画布，双击空白处新增卡片'
   });
+  world = h('div', { class: 'world' });
+  svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.classList.add('edges');
+  svg.setAttribute('aria-label', '卡片之间的连接');
+  nodesLayer = h('div', { class: 'nodes' });
+  world.append(svg, nodesLayer);
+  stage.append(world);
   const wrap = h(
     'main',
     { class: 'stage-wrap' },
     stage,
-    toolbar,
     h('div', {
       id: 'selection-tools',
       class: 'selection-tools floating hidden',
+      'aria-label': '所选卡片操作',
       onPointerdown: (e) => e.preventDefault()
     }),
-    h(
-      'div',
-      { class: 'canvas-heading' },
-      h('div', { class: 'eyebrow' }, 'THINK IN YOUR OWN WAY'),
-      title,
-      h('p', {}, '先写下来，再慢慢找到它们之间的关系。')
-    ),
     h('div', { id: 'connect-message' }),
     h('div', { id: 'recovery' }),
     h('div', { id: 'empty' }),
-    h(
-      'div',
-      { class: 'canvas-footer' },
-      '双击编辑想法',
-      h('span', {}, '·'),
-      '拖动自由摆放',
-      h('span', { class: 'desktop-hint' }, '·'),
-      h(
-        'span',
-        { class: 'desktop-hint', style: 'padding:0;color:inherit' },
-        'Tab 延伸分支 · 拖空白移动画布'
-      )
-    ),
-    h('div', { id: 'counter', class: 'canvas-counter' }),
     h(
       'div',
       { class: 'zoom floating' },
@@ -312,11 +322,11 @@ function build() {
       h('span', { class: 'percent', id: 'zoom' }),
       button('＋', () => zoomAt(1.25), '', { 'aria-label': '放大画布' }),
       h('div', { class: 'sep' }),
-      button('适配全部', fitAll, 'fit', { 'aria-label': '显示全部想法' })
+      button('显示全部', fitAll, 'fit', { 'aria-label': '显示全部卡片' })
     )
   );
   $('#app').replaceChildren(h('div', { class: 'workspace' }, top, wrap));
-  updateBoardSelect();
+  updateBoardMenu();
   bindCanvas();
   renderBoard();
   status();
@@ -337,10 +347,14 @@ function renderBoard() {
         class: `idea ${n.color}`,
         tabindex: '0',
         'data-node-id': n.id,
-        'aria-label': `想法：${n.text.slice(0, 80) || '空白想法'}`,
+        'aria-label': `卡片：${n.text.slice(0, 80) || '空白卡片'}`,
         onDblclick: (e) => {
+          if (e.target.closest('textarea')) return;
           e.stopPropagation();
-          beginEdit(n.id);
+          beginEdit(
+            n.id,
+            textCursor(el.querySelector('.idea-text'), e.clientX, e.clientY)
+          );
         },
         onKeydown: (e) => {
           if (e.target.tagName === 'TEXTAREA') return;
@@ -354,20 +368,7 @@ function renderBoard() {
           }
         }
       },
-      text,
-      button(
-        '＋',
-        (e) => {
-          e.stopPropagation();
-          selection = { kind: 'node', id: n.id };
-          addBranch();
-        },
-        'idea-add',
-        {
-          'aria-label': `从此想法延伸分支：${n.text.slice(0, 30) || '空白想法'}`,
-          title: '延伸一个分支（Tab）'
-        }
-      )
+      text
     );
     el.style.left = `${n.x}px`;
     el.style.top = `${n.y}px`;
@@ -384,7 +385,6 @@ function renderBoard() {
       : h(
           'div',
           { class: 'empty-guide' },
-          h('p', {}, '画布空着，也可以重新开始。'),
           button('＋ 写下第一个想法', () => addIdea(), 'primary')
         )
   );
@@ -395,6 +395,7 @@ function applyView() {
   $('#zoom').textContent = `${Math.round(v.scale * 100)}%`;
   stage.style.backgroundPosition = `${v.x}px ${v.y}px`;
   stage.style.backgroundSize = `${24 * v.scale}px ${24 * v.scale}px`;
+  positionTools();
 }
 function renderEdges() {
   const NS = 'http://www.w3.org/2000/svg',
@@ -447,17 +448,111 @@ function renderEdges() {
     }
     svg.append(group);
   }
+  positionTools();
+}
+// This layer is outside the scaled world so labels and hit targets stay readable.
+function positionTools() {
+  const tools = $('#selection-tools');
+  if (!tools || tools.classList.contains('hidden') || !selection) return;
+  const viewport = stage.getBoundingClientRect();
+  let anchor;
+  if (selection.kind === 'node') {
+    anchor = nodeEls.get(selection.id)?.getBoundingClientRect();
+  } else {
+    const path = [...svg.querySelectorAll('[data-edge-id]')].find(
+      (el) => el.dataset.edgeId === selection.id
+    );
+    if (path) {
+      const bounds = path.getBoundingClientRect();
+      if (
+        bounds.right < viewport.left ||
+        bounds.left > viewport.right ||
+        bounds.bottom < viewport.top ||
+        bounds.top > viewport.bottom
+      ) {
+        tools.style.visibility = 'hidden';
+        return;
+      }
+      const point =
+        selection.point || path.getPointAtLength(path.getTotalLength() / 2);
+      const screen = new DOMPoint(point.x, point.y).matrixTransform(
+        path.getScreenCTM()
+      );
+      screen.x = clamp(screen.x, viewport.left + 12, viewport.right - 12);
+      screen.y = clamp(screen.y, viewport.top + 12, viewport.bottom - 12);
+      anchor = {
+        left: screen.x,
+        right: screen.x,
+        top: screen.y,
+        bottom: screen.y
+      };
+    }
+  }
+  const visible =
+    anchor &&
+    anchor.right >= viewport.left &&
+    anchor.left <= viewport.right &&
+    anchor.bottom >= viewport.top &&
+    anchor.top <= viewport.bottom;
+  tools.style.visibility = visible ? '' : 'hidden';
+  if (!visible) return;
+  const margin = 12,
+    gap = 9,
+    width = tools.offsetWidth,
+    height = tools.offsetHeight;
+  let left = clamp(
+    anchor.left - viewport.left,
+    margin,
+    Math.max(margin, viewport.width - width - margin)
+  );
+  let top = anchor.bottom - viewport.top + gap;
+  const above = anchor.top - viewport.top - height - gap;
+  if (top + height > viewport.height - margin) {
+    if (above >= margin) top = above;
+    else {
+      // Very tall cards: put tools beside the card when there is room.
+      const right = anchor.right - viewport.left + gap;
+      const sideLeft = anchor.left - viewport.left - width - gap;
+      if (right + width <= viewport.width - margin) left = right;
+      else if (sideLeft >= margin) left = sideLeft;
+      top = clamp(
+        anchor.top - viewport.top,
+        margin,
+        Math.max(margin, viewport.height - height - margin)
+      );
+    }
+  }
+  tools.style.left = `${left}px`;
+  tools.style.top = `${top}px`;
+  const menu = $('#card-menu');
+  if (menu && !menu.hidden) {
+    const menuLeft = clamp(
+      left + width - menu.offsetWidth,
+      margin,
+      Math.max(margin, viewport.width - menu.offsetWidth - margin)
+    );
+    const below = top + height + gap;
+    const menuTop =
+      below + menu.offsetHeight <= viewport.height - margin
+        ? below
+        : clamp(
+            top - menu.offsetHeight - gap,
+            margin,
+            Math.max(margin, viewport.height - menu.offsetHeight - margin)
+          );
+    menu.style.left = `${menuLeft - left}px`;
+    menu.style.right = 'auto';
+    menu.style.top = `${menuTop - top}px`;
+  }
 }
 function updateTools() {
   const n = activeNode(),
     selected = !!selection;
   for (const [id, enabled] of [
-    ['branch', !!n],
     ['undo', histories.canUndo(board().id)],
     ['redo', histories.canRedo(board().id)]
   ])
     $('#' + id).disabled = !enabled;
-  $('#connect').classList.toggle('active', connecting);
   stage.classList.toggle('connecting', connecting);
   nodeEls.forEach((el, id) => {
     el.classList.toggle(
@@ -465,25 +560,57 @@ function updateTools() {
       selection?.kind === 'node' && selection.id === id
     );
     el.classList.toggle('connection-source', connecting && connectFrom === id);
-    el.querySelector('.idea-note')?.remove();
-    if (selection?.id === id && !editing)
-      el.append(h('span', { class: 'idea-note' }, '双击编辑 · Tab 继续展开'));
   });
   const tools = $('#selection-tools');
-  tools.classList.toggle('hidden', !selected);
+  const key = `${board().id}:${selection?.kind}:${selection?.id}`;
+  if (key !== toolsSelection) cardMenuOpen = false;
+  toolsSelection = key;
+  tools.classList.toggle('hidden', !selected || connecting);
+  tools.setAttribute('aria-label', n ? '所选卡片操作' : '所选连线操作');
   tools.replaceChildren();
   if (n) {
+    tools.append(
+      button('编辑', () => beginEdit(n.id), 'small', {
+        disabled: editing?.id === n.id
+      }),
+      button('＋延伸', addBranch, 'small', {
+        'aria-label': '延伸卡片',
+        title: '添加相连卡片（Tab）'
+      }),
+      button('连接', toggleConnect, 'small', { 'aria-label': '连接卡片' }),
+      button(
+        '⋯',
+        (event) => {
+          const opening = !cardMenuOpen;
+          finishEdit();
+          closeMenus();
+          cardMenuOpen = opening;
+          updateTools();
+          if (opening && event.detail === 0) $('#card-menu button')?.focus();
+        },
+        'small tool-more',
+        {
+          id: 'card-more',
+          'aria-label': '卡片更多操作',
+          'aria-controls': 'card-menu',
+          'aria-expanded': String(cardMenuOpen)
+        }
+      )
+    );
+    const palette = h('div', { class: 'palette', 'aria-label': '卡片颜色' });
     for (const color of COLORS)
-      tools.append(
+      palette.append(
         button(
           '',
           () => {
             finishEdit();
+            closeMenus();
             const before = snapshot();
             n.color = color;
             pushHistory(before);
             markDirty();
             renderBoard();
+            stage.focus();
           },
           `swatch ${color}${n.color === color ? ' chosen' : ''}`,
           {
@@ -493,45 +620,67 @@ function updateTools() {
         )
       );
     tools.append(
-      h('div', { class: 'sep' }),
-      button('编辑', () => beginEdit(n.id), 'small')
+      h(
+        'div',
+        {
+          id: 'card-menu',
+          class: 'card-menu popup-menu',
+          hidden: !cardMenuOpen
+        },
+        palette,
+        h('hr'),
+        button(
+          '删除卡片',
+          () => {
+            closeMenus();
+            removeSelected();
+          },
+          'danger',
+          { 'aria-label': '删除卡片' }
+        )
+      )
     );
-  }
-  tools.append(
-    button(
-      selection?.kind === 'edge' ? '删除连线' : '删除',
-      removeSelected,
-      'small danger',
-      { 'aria-label': selection?.kind === 'edge' ? '删除连线' : '删除想法' }
-    )
-  );
-  $('#counter').textContent =
-    `${board().nodes.length} 个想法 · ${board().edges.length} 条连接`;
+  } else if (selected)
+    tools.append(
+      button('删除连线', removeSelected, 'small danger', {
+        'aria-label': '删除连线'
+      })
+    );
   const message = $('#connect-message');
   message.replaceChildren(
     connecting
       ? h(
           'div',
           { class: 'connect-message' },
-          connectFrom
-            ? '点击另一个想法，建立连接'
-            : '先点击起点想法，再点击终点',
-          button('取消 Esc', cancelConnect)
+          '选择另一张卡片',
+          button(
+            '取消连接',
+            () => {
+              cancelConnect();
+              stage.focus();
+            },
+            '',
+            { title: '取消连接（Esc）' }
+          )
         )
       : document.createTextNode('')
   );
+  positionTools();
 }
 function cancelConnect() {
   connecting = false;
   connectFrom = null;
-  if ($('#connect')) updateTools();
+  if ($('#selection-tools')) updateTools();
 }
 function toggleConnect() {
   finishEdit();
   if (connecting) return cancelConnect();
+  if (!activeNode()) return;
+  closeMenus();
   connecting = true;
   connectFrom = activeNode()?.id || null;
   updateTools();
+  stage.focus();
 }
 function linkTo(id) {
   if (!connectFrom) {
@@ -579,6 +728,7 @@ function freePosition(x, y) {
 }
 function addIdea(position) {
   finishEdit();
+  closeMenus();
   if (board().nodes.length >= LIMITS.nodes)
     return note('这张画布的想法已达上限，可以新建一张继续。');
   const p = position || centerPoint(),
@@ -596,6 +746,7 @@ function addIdea(position) {
 }
 function addBranch() {
   finishEdit();
+  closeMenus();
   const parent = activeNode();
   if (!parent) return note('先选中一个想法，再展开分支。');
   if (
@@ -624,12 +775,24 @@ function reveal(n) {
     ny = n.y * v.scale + v.y;
   if (nx < 35 || nx + 225 * v.scale > w - 35)
     v.x = xy(w / 2 - (n.x + 112) * v.scale);
-  if (ny < 175 || ny + 100 * v.scale > ht - 75)
-    v.y = xy(Math.max(190, ht / 2) - (n.y + 50) * v.scale);
+  if (ny < 35 || ny + 100 * v.scale > ht - 75)
+    v.y = xy(Math.max(50, ht / 2) - (n.y + 50) * v.scale);
   applyView();
   markDirty();
 }
-function beginEdit(id) {
+function textCursor(element, x, y) {
+  if (!element) return;
+  const caret = document.caretPositionFromPoint?.(x, y);
+  const range = caret ? null : document.caretRangeFromPoint?.(x, y);
+  const node = caret?.offsetNode || range?.startContainer;
+  const offset = caret?.offset ?? range?.startOffset;
+  if (!node || !element.contains(node)) return;
+  const before = document.createRange();
+  before.selectNodeContents(element);
+  before.setEnd(node, offset);
+  return before.toString().length;
+}
+function beginEdit(id, cursor) {
   if (editing?.id === id) return;
   finishEdit();
   cancelConnect();
@@ -643,8 +806,8 @@ function beginEdit(id) {
   const input = h('textarea', {
     class: 'idea-editor',
     maxlength: LIMITS.text,
-    'aria-label': '编辑想法',
-    placeholder: '写下你的想法…',
+    'aria-label': '编辑卡片',
+    placeholder: '写下任何想法…',
     value: n.text,
     onInput: () => {
       n.text = input.value;
@@ -682,7 +845,10 @@ function beginEdit(id) {
   el.querySelector('.idea-text').replaceWith(input);
   resize();
   input.focus();
-  input.select();
+  const insertion = Number.isInteger(cursor)
+    ? clamp(cursor, 0, n.text.length)
+    : n.text.length;
+  input.setSelectionRange(insertion, insertion);
 }
 function finishEdit() {
   if (!editing) return;
@@ -696,7 +862,7 @@ function finishEdit() {
       h('div', { class: 'idea-text' }, n.text)
     );
     el.classList.remove('editing');
-    el.setAttribute('aria-label', `想法：${n.text.slice(0, 80) || '空白想法'}`);
+    el.setAttribute('aria-label', `卡片：${n.text.slice(0, 80) || '空白卡片'}`);
     if (b.id === workspace.activeId) pushHistory(old.before);
   }
   updateTools();
@@ -704,6 +870,7 @@ function finishEdit() {
 }
 function removeSelected() {
   finishEdit();
+  closeMenus();
   if (!selection) return;
   const before = snapshot();
   if (selection.kind === 'node') deleteNode(board(), selection.id);
@@ -714,6 +881,7 @@ function removeSelected() {
   markDirty();
   renderBoard();
   note('已删除，可以撤销。');
+  stage.focus();
 }
 function zoomAt(factor, client) {
   finishEdit();
@@ -751,12 +919,12 @@ function fitAll() {
     w = stage.clientWidth,
     ht = stage.clientHeight;
   v.scale = clamp(
-    Math.min(1, (w - 90) / (maxX - minX + 50), (ht - 250) / (maxY - minY + 50)),
+    Math.min(1, (w - 90) / (maxX - minX + 50), (ht - 120) / (maxY - minY + 50)),
     0.2,
     2.5
   );
   v.x = xy(w / 2 - ((minX + maxX) / 2) * v.scale);
-  v.y = xy(Math.max(210, (ht + 105) / 2) - ((minY + maxY) / 2) * v.scale);
+  v.y = xy(ht / 2 - ((minY + maxY) / 2) * v.scale);
   applyView();
   markDirty();
 }
@@ -774,7 +942,11 @@ function bindCanvas() {
       return;
     }
     if (edge) {
-      selection = { kind: 'edge', id: edge.dataset.edgeId };
+      selection = {
+        kind: 'edge',
+        id: edge.dataset.edgeId,
+        point: worldPoint(e.clientX, e.clientY)
+      };
       updateTools();
       renderEdges();
       return;
@@ -870,6 +1042,7 @@ function bindCanvas() {
 }
 function newBoard() {
   finishEdit();
+  closeMenus();
   if (workspace.boards.length >= LIMITS.boards)
     return note('画布数量已达上限。');
   const b = createBoard('未命名画布');
@@ -877,10 +1050,11 @@ function newBoard() {
   workspace.activeId = b.id;
   selection = null;
   cancelConnect();
-  updateBoardSelect();
+  updateBoardMenu();
   renderBoard();
   fitAll();
   markDirty();
+  beginEdit(b.nodes[0].id);
 }
 function modal(title, ...children) {
   const d = h(
@@ -918,6 +1092,8 @@ function backup(all = true) {
 }
 function showFiles() {
   finishEdit();
+  closeMenus();
+  cancelConnect();
   let candidate = null,
     readTicket = 0;
   const error = h('div', { class: 'error-text', role: 'alert' }),
@@ -934,7 +1110,7 @@ function showFiles() {
         selection = null;
         cancelConnect();
         markDirty();
-        updateBoardSelect();
+        updateBoardMenu();
         renderBoard();
         fitAll();
         d.close();
@@ -978,7 +1154,7 @@ function showFiles() {
               h(
                 'div',
                 {},
-                `${b.title || '未命名画布'} · ${b.nodes.length} 个想法`
+                `${b.title || '未命名画布'} · ${b.nodes.length} 张卡片`
               )
             )
           )
@@ -996,7 +1172,7 @@ function showFiles() {
       '内容自动保存在当前浏览器。JSON 用于备份和迁移，导入会追加新画布。'
     ),
     button(
-      ['导出当前画布', h('small', {}, '包含想法、位置、颜色和所有连接。')],
+      ['导出当前画布', h('small', {}, '包含卡片、位置、颜色和所有连接。')],
       () => backup(false),
       'export-item'
     ),
@@ -1011,19 +1187,7 @@ function showFiles() {
     h('div', { style: 'margin-top:24px' }, file),
     error,
     preview,
-    h(
-      'div',
-      { class: 'actions' },
-      button(
-        '删除当前画布…',
-        () => {
-          d.close();
-          removeBoard();
-        },
-        'ghost small danger'
-      ),
-      confirm
-    )
+    h('div', { class: 'actions' }, confirm)
   );
 }
 function removeBoard() {
@@ -1049,7 +1213,7 @@ function removeBoard() {
           selection = null;
           d.close();
           markDirty();
-          updateBoardSelect();
+          updateBoardMenu();
           renderBoard();
           note('画布已移除。', () => {
             if (workspace.boards.length >= LIMITS.boards)
@@ -1057,7 +1221,7 @@ function removeBoard() {
             workspace.boards.push(target);
             workspace.activeId = target.id;
             markDirty();
-            updateBoardSelect();
+            updateBoardMenu();
             renderBoard();
           });
         },
@@ -1067,6 +1231,7 @@ function removeBoard() {
   );
 }
 function toggleHelp() {
+  closeMenus();
   if ($('.help-pop')) {
     $('.help-pop').remove();
     return;
@@ -1077,7 +1242,7 @@ function toggleHelp() {
     button('×', () => help.remove(), 'help-close', {
       'aria-label': '关闭提示'
     }),
-    h('h2', {}, '像摆放想法一样思考'),
+    h('h2', {}, '让思维可以自由生长'),
     h(
       'p',
       {},
@@ -1086,16 +1251,21 @@ function toggleHelp() {
     h(
       'p',
       {},
-      '② 选中卡片点“＋分支”，或按 ',
+      '② 选中卡片点旁边的“＋延伸”，或按 ',
       h('kbd', {}, 'Tab'),
       '，继续展开。拖动卡片改变组合。'
     ),
     h(
       'p',
       {},
-      '③ 点“连线”选择另一个想法；连线可以跨分支。点击线条后可以删除。'
+      '③ 选中卡片点“连接”，再点另一张卡片；按 Esc 取消。点击线条后可以删除。'
     ),
-    h('p', {}, '拖动空白处平移；Ctrl / ⌘ + 滚轮缩放。“适配全部”找回整张画布。'),
+    h(
+      'p',
+      {},
+      '点卡片旁的“⋯”换色或删除。拖动空白处平移；Ctrl / ⌘ + 滚轮缩放，“显示全部”找回卡片。'
+    ),
+    h('p', {}, '点击顶部画布名称改名；旁边菜单可切换、新建或删除画布。'),
     h(
       'p',
       {},
@@ -1147,7 +1317,7 @@ function showRecovery() {
             selection = null;
             editing = null;
             markDirty();
-            updateBoardSelect();
+            updateBoardMenu();
             renderBoard();
             showRecovery();
             flush();
@@ -1156,6 +1326,18 @@ function showRecovery() {
     )
   );
 }
+document.addEventListener('pointerdown', (e) => {
+  if (!e.target.closest('#board-picker')) {
+    $('#board-menu')?.setAttribute('hidden', '');
+    $('#board-menu-toggle')?.setAttribute('aria-expanded', 'false');
+  }
+  if (!e.target.closest('#selection-tools')) {
+    cardMenuOpen = false;
+    $('#card-menu')?.setAttribute('hidden', '');
+    $('#card-more')?.setAttribute('aria-expanded', 'false');
+  }
+});
+window.addEventListener('resize', positionTools);
 document.addEventListener('keydown', (e) => {
   if (
     e.isComposing ||
@@ -1167,9 +1349,16 @@ document.addEventListener('keydown', (e) => {
     'textarea,input,select,[contenteditable=true]'
   );
   if (e.key === 'Escape') {
+    const focusBack = !$('#board-menu').hidden
+      ? '#board-menu-toggle'
+      : cardMenuOpen
+        ? '#card-more'
+        : null;
+    closeMenus();
     finishEdit();
     cancelConnect();
     $('.help-pop')?.remove();
+    ($(focusBack || '#stage') || stage).focus();
     return;
   }
   if (typing) return;
@@ -1228,7 +1417,7 @@ window.addEventListener('storage', (e) => {
   selection = null;
   histories.clear();
   cancelConnect();
-  updateBoardSelect();
+  updateBoardMenu();
   renderBoard();
   note('已载入另一个页面的更新。');
 });
@@ -1242,15 +1431,15 @@ window.addEventListener('beforeunload', (e) => {
     e.returnValue = '';
   }
 });
-if (!workspace.boards.length) workspace = createWorkspace();
-if (loaded.status === 'empty') board().title = '我的第一张画布';
-build();
-if (
+const freshCanvas =
   loaded.status === 'empty' ||
-  loaded.status === 'invalid' ||
-  loaded.status === 'unavailable'
-)
-  fitAll();
+  loaded.status === 'unavailable' ||
+  !workspace.boards.length;
+if (!workspace.boards.length) workspace = createWorkspace();
+build();
+new ResizeObserver(positionTools).observe(stage);
+if (freshCanvas || loaded.status === 'invalid') fitAll();
+if (freshCanvas) beginEdit(board().nodes[0].id);
 if (loaded.status === 'unavailable') {
   saveError = '保存不可用，请从文件导出';
   status();

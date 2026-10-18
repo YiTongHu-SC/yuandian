@@ -16,9 +16,69 @@ test('new workspace is a valid editable canvas without prescribed structure', ()
   const workspace = createWorkspace(), board = workspace.boards[0];
   assert.equal(workspace.version, VERSION);
   assert.equal(workspace.activeId, board.id);
-  assert.equal(board.nodes[0].text, '我想想清楚的问题');
+  assert.equal(board.nodes.length, 1);
+  assert.equal(board.nodes[0].text, '');
   assert.deepEqual(board.view, { x: 0, y: 0, scale: 1 });
   assert.equal(validateWorkspace(workspace).ok, true);
+});
+
+test('new blank card survives save and load without adding placeholder content', () => {
+  const workspace = createWorkspace(), local = storage();
+  const saved = save(local, workspace, null);
+  assert.equal(saved.ok, true);
+  const restored = load(local);
+  assert.equal(restored.status, 'loaded');
+  assert.deepEqual(restored.workspace, workspace);
+  assert.equal(restored.workspace.boards[0].nodes[0].text, '');
+});
+
+test('existing v1 starter text and graph survive load, export and append without rewriting storage', () => {
+  const legacy = {
+    version: 1,
+    activeId: 'board-legacy',
+    boards: [{
+      id: 'board-legacy',
+      title: '原有问题与想法',
+      createdAt: '2026-10-17T09:00:00.000Z',
+      updatedAt: '2026-10-17T10:00:00.000Z',
+      nodes: [
+        { id: 'node-legacy-root', text: '我想想清楚的问题', x: -160.5, y: 80, color: 'green' },
+        { id: 'node-legacy-child', text: '原有第二张卡\n保留原文', x: 240, y: -95.25, color: 'rose' }
+      ],
+      edges: [{ id: 'edge-legacy', from: 'node-legacy-root', to: 'node-legacy-child', label: '原有联系' }],
+      view: { x: 135, y: -42.5, scale: 1.25 }
+    }]
+  };
+  const originalRaw = JSON.stringify(legacy), local = storage(originalRaw);
+  assert.equal(CANVAS_KEY, 'yitong.thinking-canvas.v1');
+  assert.equal(VERSION, 1);
+  const loaded = load(local);
+  assert.equal(loaded.status, 'loaded');
+  assert.deepEqual(loaded.workspace, legacy);
+  const exported = exportJSON(loaded.workspace);
+  assert.deepEqual(JSON.parse(exported), legacy);
+
+  // Import back into the same workspace to also exercise identity collisions.
+  const appended = importAppend(loaded.workspace, exported);
+  assert.equal(appended.ok, true);
+  assert.deepEqual(appended.workspace.boards[0], legacy.boards[0]);
+  const imported = appended.workspace.boards[1], original = legacy.boards[0];
+  assert.notEqual(imported.id, original.id);
+  assert.equal(imported.title, original.title);
+  assert.equal(imported.createdAt, original.createdAt);
+  assert.equal(imported.updatedAt, original.updatedAt);
+  assert.deepEqual(imported.view, original.view);
+  assert.deepEqual(imported.nodes.map(({ id, ...content }) => content), original.nodes.map(({ id, ...content }) => content));
+  assert.notEqual(imported.nodes[0].id, original.nodes[0].id);
+  assert.notEqual(imported.nodes[1].id, original.nodes[1].id);
+  assert.equal(imported.edges[0].from, imported.nodes[0].id);
+  assert.equal(imported.edges[0].to, imported.nodes[1].id);
+  assert.equal(imported.edges[0].label, original.edges[0].label);
+  assert.equal(appended.workspace.activeId, imported.id);
+  assert.deepEqual(loaded.workspace, legacy);
+  assert.equal(JSON.stringify(legacy), originalRaw);
+  assert.equal(local.getItem(CANVAS_KEY), originalRaw);
+  assert.equal(local.calls.some(([call]) => call === 'set'), false);
 });
 
 test('connect supports free graph relationships but rejects invalid links', () => {
