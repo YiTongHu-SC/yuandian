@@ -4,5 +4,11 @@
   "description": "原点 · 自由思考画布：自由书写、摆放与连接想法的本机工具",
   "private": true,
   "type": "module",
-  "scripts": { "test": "node --test canvas-model.test.mjs model.test.mjs logic.test.mjs", "check": "node --check canvas.js" }
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node scripts/dev-server.mjs",
+    "test": "node scripts/test.mjs",
+    "check": "node scripts/check.mjs",
+    "verify": "npm run check && npm test"
+  }
 }

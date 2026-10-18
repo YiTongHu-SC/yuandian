@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { calculate, detachRecord, changedAnalyses, safeFileName } from './logic.js';
-import { createAnalysis, createRecord, validateWorkspace, SCHEMA_VERSION } from './model.js';
+import { calculate, detachRecord, changedAnalyses, safeFileName } from '../../src/guided/logic.js';
+import { createAnalysis, createRecord, validateWorkspace, SCHEMA_VERSION } from '../../src/guided/model.js';
 
 function calculationFixture(leftValue, rightValue, extras = {}) {
   const analysis = {

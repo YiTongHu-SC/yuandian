@@ -1,7 +1,11 @@
 node_modules/
+dist/
 private/
 backups/
 coverage/
+test-results/
+.vscode/
+.idea/
 *.log
 *.tmp
 .env

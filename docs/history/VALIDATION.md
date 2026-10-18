@@ -1,5 +1,7 @@
 # 验证记录
 
+历史记录：以下结果与命令对应旧六步工具初版目录，现行操作见 [开发与验证](../development.md)。
+
 本文件记录旧版六步工具；自由画布初版的验证见 [CANVAS-VALIDATION.md](CANVAS-VALIDATION.md)。
 
 核验日期：2026-10-18。范围：本机 Windows、Node.js 24、Codex 内置浏览器；不代表所有浏览器已兼容验证。
@@ -23,7 +25,7 @@
 - 清理所有功能自检问题，只留默认空白问题；页面保存状态正常，控制台无错误；当前视口无横向溢出。
 - `start.ps1 -NoBrowser` 首次启动、重复启动以及 `Start.cmd -NoBrowser` 均通过；复用同一服务，仅监听 `127.0.0.1:4176`。
 
-页面预览见 [preview.png](preview.png)。验证数据仅用于功能检查，未作为任何用户的事实、收益或建议保留。
+页面预览见 [preview.png](../../assets/screenshots/preview.png)。验证数据仅用于功能检查，未作为任何用户的事实、收益或建议保留。
 
 ## 使用边界
 

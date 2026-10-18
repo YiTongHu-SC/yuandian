@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CANVAS_KEY, VERSION, LIMITS, createWorkspace, createBoard, createNode, connect, deleteNode, validateWorkspace, parseImport, importAppend, load, save, exportJSON } from './canvas-model.js';
+import { CANVAS_KEY, VERSION, LIMITS, createWorkspace, createBoard, createNode, connect, deleteNode, validateWorkspace, parseImport, importAppend, load, save, exportJSON } from '../../src/canvas/model.js';
 
 const copy = value => JSON.parse(JSON.stringify(value));
 function storage(raw = null) {

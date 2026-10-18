@@ -4,7 +4,7 @@ import {
   SCHEMA_VERSION, STORAGE_KEY, LIMITS, createWorkspace, createAnalysis,
   createExampleAnalysis, createRecord, validateWorkspace, normalizeImport,
   mergeImport, loadWorkspace, saveWorkspace, exportMarkdown, getReadiness, getAnalysis,
-} from './model.js';
+} from '../../src/guided/model.js';
 
 const copy = value => JSON.parse(JSON.stringify(value));
 function memoryStorage(initial = null) {
