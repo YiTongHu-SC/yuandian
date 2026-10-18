@@ -1,0 +1,11 @@
+node_modules/
+private/
+backups/
+coverage/
+*.log
+*.tmp
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db

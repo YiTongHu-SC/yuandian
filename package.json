@@ -1,0 +1,8 @@
+{
+  "name": "yuandian-thinking-canvas",
+  "version": "0.1.0",
+  "description": "原点 · 自由思考画布：自由书写、摆放与连接想法的本机工具",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test canvas-model.test.mjs model.test.mjs logic.test.mjs", "check": "node --check canvas.js" }
+}
