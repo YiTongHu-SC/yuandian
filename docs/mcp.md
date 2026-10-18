@@ -33,6 +33,31 @@
 
 不同客户端的配置格式可能不同；需要手动配置时，保持 `command`、`args` 和两项环境变量的含义一致。stdio 的进程由 AI 客户端启动，不需要另开终端运行 `npm run mcp`。
 
+## Codex 接入
+
+Codex 的客户端配置采用 TOML，不能将面板的整段 `mcpServers` JSON 直接贴入。Codex CLI、编辑器扩展和桌面端使用共享的 `~/.codex/config.toml`；Windows 默认位置为 `%USERPROFILE%\.codex\config.toml`，设置了 `CODEX_HOME` 时以该目录为准。配置位置与字段见 [Codex 官方 MCP 文档](https://developers.openai.com/codex/mcp)。
+
+1. 在原点选择目标画布，结束正在进行的编辑，打开“AI 接入”。需要编辑时选“读写”，再点“开启接入”，保持该页面和本机服务运行。
+2. 备份已有 Codex 配置，在保留其他服务的前提下新增或更新 `yuandian`。将面板中的 `command`、`args` 和 `env` 逐项填入下面的 TOML；以下均为占位符，不包含可用令牌。
+3. 在 Codex 桌面端的 Settings → MCP servers 保存配置后，对 `yuandian` 选择 Restart；通过文件或 CLI 更改配置后也要让客户端重新加载该服务。CLI 的 `codex mcp list` 可确认服务已登记，但不能代替工具调用验证。
+4. 确认客户端已显示 `connection_status`、`get_canvas`、`edit_canvas`，先调用状态和读取工具。编辑时使用本次读取返回的 `revision`，先在虚构测试画布验证新增、修改和连线，再使用自己的画布。
+
+```toml
+[mcp_servers.yuandian]
+command = "<面板 command 中的 Node 程序绝对路径>"
+args = ["<面板 args 中的脚本绝对路径>"]
+
+[mcp_servers.yuandian.env]
+YUANDIAN_URL = "http://127.0.0.1:4176"
+YUANDIAN_MCP_TOKEN = "<面板中本次接入的临时令牌>"
+```
+
+Windows 路径可在 TOML 中使用单引号保留反斜杠，例如 `args = ['F:\projects\thinking-canvas\scripts\mcp-server.mjs']`；使用双引号时须将每个反斜杠写成 `\\`。实际 Node 和脚本路径以面板生成的配置为准。
+
+保存配置不等于当前聊天已经加载新工具。桌面端提供服务重启入口，但本轮聊天是否能立即刷新工具列表，须以客户端实际行为和成功调用为准；仍未出现工具时重新打开聊天后再核对，不能仅凭配置文件或服务列表宣称已接通。能够返回画布内容，并将测试修改保存后在页面看到，才分别证明读取和编辑可用。
+
+刷新或关闭授权页、切换画布、断开接入、服务重启或会话过期后，旧令牌失效。重新开启接入，替换 Codex 配置中的 `YUANDIAN_MCP_TOKEN` 并重新加载 `yuandian`；修改权限也需这一步。客户端配置会在本机保留所填的令牌，但原点不会自动更新它，也不会因此恢复旧授权。勿将含真实令牌的客户端配置复制到项目文档、日志或 Git。
+
 ## 权限与生命周期
 
 | 项目 | 当前行为 |
