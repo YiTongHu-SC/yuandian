@@ -15,6 +15,8 @@ import {
   exportJSON
 } from './model.js';
 import { createHistory, snapshotBoard } from './history.js';
+import { revisionOf, applyMcpEdits } from './mcp-model.js';
+import { createMcpPanel } from './mcp-ui.js';
 import {
   clamp,
   coordinate as xy,
@@ -72,6 +74,7 @@ let cardMenuOpen = false,
 let fileImportCandidate = null,
   fileReadTicket = 0,
   fileImportActive = false;
+let mcpPanel = null;
 const histories = createHistory();
 const board = () => workspace.boards.find((b) => b.id === workspace.activeId);
 const activeNode = () =>
@@ -171,6 +174,107 @@ function undo(redo = false) {
   markDirty();
   renderBoard();
 }
+function canConnectMcp() {
+  if (corrupt) return '原存储异常，请先备份并恢复数据。';
+  if (conflict) return '另一页有更新，请先处理保存冲突。';
+  if (saveError) return saveError;
+  try {
+    storage.getItem(CANVAS_KEY);
+  } catch {
+    return '浏览器存储不可用，请先导出备份。';
+  }
+  return true;
+}
+function mcpWriteBlock() {
+  const available = canConnectMcp();
+  if (available !== true) return available;
+  if (
+    dirty ||
+    editing ||
+    dragging ||
+    connecting ||
+    fileImportActive ||
+    document.querySelector('dialog[open]') ||
+    document.activeElement?.id === 'board-title'
+  )
+    return '画布正在编辑或保存，请完成操作后重新读取并重试。';
+  return '';
+}
+async function readMcpCanvas() {
+  const current = copy(board());
+  return { ok: true, board: current, revision: await revisionOf(current) };
+}
+async function editMcpCanvas(args, { isAuthorized } = {}) {
+  const authorized = () => typeof isAuthorized === 'function' && isAuthorized();
+  const revoked = () => ({
+    ok: false,
+    code: 'authorization_revoked',
+    error: '本次 AI 接入已断开，修改未应用。'
+  });
+  const commit = async () => {
+    if (!authorized()) return revoked();
+    const blocked = mcpWriteBlock();
+    if (blocked) return { ok: false, code: 'canvas_busy', error: blocked };
+    const original = JSON.stringify(workspace),
+      current = board(),
+      before = snapshotBoard(current),
+      result = await applyMcpEdits(copy(current), args);
+    if (!authorized()) return revoked();
+    if (!result.ok) return result;
+    // Hashing is asynchronous: recheck local edits and cross-page state before saving.
+    if (mcpWriteBlock() || JSON.stringify(workspace) !== original)
+      return {
+        ok: false,
+        code: 'revision_conflict',
+        error: '画布已经变化，请重新读取后再编辑。'
+      };
+    const next = copy(workspace);
+    next.boards[next.boards.findIndex((b) => b.id === current.id)] =
+      result.board;
+    const saved = save(storage, next, savedRaw);
+    if (!saved.ok) {
+      if (saved.status === 'conflict') {
+        conflict = true;
+        showRecovery();
+      } else saveError = saved.error || '保存失败，AI 修改未应用。';
+      status();
+      return { ok: false, code: saved.status, error: saved.error };
+    }
+    workspace = next;
+    savedRaw = saved.raw;
+    dirty = false;
+    saveError = '';
+    histories.record(board(), before);
+    selection = null;
+    closeMenus();
+    cancelConnect();
+    updateBoardMenu();
+    renderBoard();
+    status();
+    note('AI 已更新画布，可撤销。');
+    return { ok: true, revision: result.revision, created: result.created };
+  };
+  try {
+    return await (navigator.locks?.request
+      ? navigator.locks.request(CANVAS_KEY, commit)
+      : commit());
+  } catch {
+    return {
+      ok: false,
+      code: 'operation_failed',
+      error: 'AI 修改未完成，请重新读取画布后重试。'
+    };
+  }
+}
+function toggleMcpPanel() {
+  finishEdit();
+  closeMenus();
+  cancelConnect();
+  const available = canConnectMcp();
+  if (available !== true) return note(available);
+  $('.help-pop')?.remove();
+  mcpPanel.toggle();
+}
 function optionLabel(b) {
   const same = workspace.boards.filter((x) => x.title === b.title);
   return `${b.title || '未命名画布'}${same.length > 1 ? ` · ${same.indexOf(b) + 1}/${same.length}` : ''}`;
@@ -221,6 +325,7 @@ function closeMenus() {
 }
 function toggleBoardMenu() {
   finishEdit();
+  mcpPanel?.close();
   const opening = $('#board-menu').hidden;
   closeMenus();
   updateBoardMenu();
@@ -326,6 +431,12 @@ function build() {
           })
         )
       ),
+      button('AI 接入', toggleMcpPanel, 'ghost small', {
+        id: 'ai-menu-toggle',
+        title: 'MCP 配置与接入',
+        'aria-controls': 'mcp-panel',
+        'aria-expanded': 'false'
+      }),
       button('帮助', toggleHelp, 'ghost small')
     )
   );
@@ -373,6 +484,8 @@ function build() {
   showRecovery();
 }
 function renderBoard() {
+  if (mcpPanel?.connected && mcpPanel.boardId !== board()?.id)
+    mcpPanel.disconnect('已切换画布，接入已断开');
   editing = null;
   nodeEls = new Map();
   nodesLayer.replaceChildren();
@@ -1149,6 +1262,7 @@ function closeFileMenu() {
 }
 function toggleFileMenu() {
   finishEdit();
+  mcpPanel?.close();
   const opening = $('#file-menu').hidden;
   closeMenus();
   cancelConnect();
@@ -1306,6 +1420,7 @@ function removeBoard() {
 }
 function toggleHelp() {
   closeMenus();
+  mcpPanel?.close();
   if ($('.help-pop')) {
     $('.help-pop').remove();
     return;
@@ -1363,6 +1478,9 @@ function showRecovery() {
   if (!el) return;
   el.replaceChildren();
   if (!corrupt && !conflict) return;
+  mcpPanel?.close();
+  if (mcpPanel?.connected)
+    void mcpPanel.disconnect('保存已暂停，AI 接入已断开。');
   el.append(
     h(
       'div',
@@ -1431,15 +1549,24 @@ document.addEventListener('keydown', (e) => {
         ? '#board-menu-toggle'
         : cardMenuOpen
           ? '#card-more'
-          : null;
+          : mcpPanel?.root && !mcpPanel.root.hidden
+            ? '#ai-menu-toggle'
+            : null;
     closeMenus();
     finishEdit();
     cancelConnect();
     $('.help-pop')?.remove();
+    mcpPanel?.close();
     ($(focusBack || '#stage') || stage).focus();
     return;
   }
-  if (typing || !$('#file-menu').hidden) return;
+  if (
+    typing ||
+    !$('#file-menu').hidden ||
+    mcpPanel?.root.contains(e.target) ||
+    (mcpPanel?.root && !mcpPanel.root.hidden && e.target === document.body)
+  )
+    return;
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
     e.preventDefault();
     undo(e.shiftKey);
@@ -1516,6 +1643,12 @@ const freshCanvas =
   !workspace.boards.length;
 if (!workspace.boards.length) workspace = createWorkspace();
 build();
+mcpPanel = createMcpPanel({
+  getCanvas: board,
+  readCanvas: readMcpCanvas,
+  editCanvas: editMcpCanvas,
+  canConnect: canConnectMcp
+});
 new ResizeObserver(positionTools).observe(stage);
 if (freshCanvas || loaded.status === 'invalid') fitAll();
 if (freshCanvas) beginEdit(board().nodes[0].id);

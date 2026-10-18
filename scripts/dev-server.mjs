@@ -61,6 +61,8 @@ export function parsePort(value) {
 export async function startDevServer({ root = PROJECT_ROOT, port = DEFAULT_PORT } = {}) {
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('无效端口。');
   const canonicalRoot = await realpath(root);
+  let bridge;
+  let bridgeLoading;
   const server = http.createServer(async (request, response) => {
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
@@ -71,6 +73,18 @@ export async function startDevServer({ root = PROJECT_ROOT, port = DEFAULT_PORT 
     try {
       if (request.headers.host !== `${HOST}:${server.address().port}`) {
         reply(403, '仅允许通过本机 127.0.0.1 访问。');
+        return;
+      }
+      if (request.url.startsWith('/api/mcp/')) {
+        // The static canvas continues to run without MCP dependencies or helper files.
+        bridgeLoading ??= import('./mcp-bridge.mjs').then(({ createMcpBridge }) => {
+          bridge = createMcpBridge({ origin: `http://${HOST}:${server.address().port}`, root: canonicalRoot });
+          return bridge;
+        });
+        try { await (await bridgeLoading).handle(request, response); }
+        catch {
+          reply(503, JSON.stringify({ ok: false, code: 'mcp_unavailable', error: 'MCP 桥未安装，请核对项目文件并重新启动服务。' }), 'application/json; charset=utf-8');
+        }
         return;
       }
       if (!['GET', 'HEAD'].includes(request.method)) {
@@ -90,6 +104,7 @@ export async function startDevServer({ root = PROJECT_ROOT, port = DEFAULT_PORT 
       reply(500, 'Internal server error');
     }
   });
+  server.once('close', () => bridge?.close());
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, HOST, () => {

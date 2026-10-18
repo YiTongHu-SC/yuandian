@@ -4,11 +4,20 @@
   "description": "原点 · 自由思考画布：自由书写、摆放与连接想法的本机工具",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node scripts/dev-server.mjs",
+    "mcp": "node scripts/mcp-server.mjs",
     "test": "node scripts/test.mjs",
     "check": "node scripts/check.mjs",
     "verify": "npm run check && npm test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.3.1"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.3.1"
   }
 }

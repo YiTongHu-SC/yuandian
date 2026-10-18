@@ -1,6 +1,6 @@
 # 架构与目录
 
-这是一个本机运行的静态网页原型。浏览器直接加载 ES Modules，Node.js 仅用于开发服务与检查，不参与用户数据处理。产品方向以 [PROJECT.md](../PROJECT.md) 为准。
+这是一个本机运行的网页原型。浏览器直接加载 ES Modules，拥有画布数据、校验和保存职责；Node.js 提供本机服务、检查，以及可选 MCP stdio 服务和内存请求桥。浏览器端无需构建或 SDK，Node 桥不持久化画布。产品方向以 [PROJECT.md](../PROJECT.md) 为准。
 
 ## 内容与交互基础
 
@@ -20,12 +20,12 @@ thinking-canvas/
 ├─ assets/screenshots/        不含个人分析的历史操作示例
 ├─ tests/
 │  ├─ unit/                   模型和纯逻辑测试
-│  └─ tooling/                开发服务与项目检查测试
-├─ scripts/                   本机服务和静态检查工具
+│  └─ tooling/                开发服务、MCP 桥与实际 stdio 测试
+├─ scripts/                   本机服务、MCP stdio / 桥和静态检查工具
 ├─ docs/                      架构、开发、数据约定
 │  └─ history/                初始化及历史验证记录
 ├─ Start.cmd / start.ps1       Windows 启动入口
-├─ package.json               Node 运行要求和统一命令
+├─ package.json / package-lock.json  Node 运行要求、命令及锁定的 MCP 依赖
 └─ README / PROJECT / AGENTS / CHANGELOG
 ```
 
@@ -39,6 +39,8 @@ thinking-canvas/
 | `src/canvas/model.js` | 工作区 / 画布 / 节点 / 连线数据，校验、追加导入、JSON 导出和存储保护 |
 | `src/canvas/history.js` | 按画布隔离的会话撤销与重做记录 |
 | `src/canvas/geometry.js` | 视图坐标换算、坐标限幅与连接曲线等纯计算 |
+| `src/canvas/mcp-model.js` | MCP 编辑白名单与 JSON Schema、内容版本、原子操作及最终 v1 校验；无 DOM 或存储 |
+| `src/canvas/mcp-ui.js` | 单张画布授权面板、临时配置、页面轮询、会话与请求期限检查 |
 | `src/canvas/styles.css` | 自由画布布局、卡片和交互视觉 |
 
 应用入口调用模型处理数据，再将用户内容作为文本显示。纯模块不依赖 DOM、网络或旧六步工具。会话历史与选择不写入数据格式；视图位置保存在画布数据中，但不进入节点编辑撤销。
@@ -49,12 +51,29 @@ thinking-canvas/
 
 空卡片通过模型中已有的 `text: ''` 表达；占位提示仅由界面呈现。新画布的首张卡片由应用进入编辑，已有工作区加载和 JSON 导入不触发内容替换。界面文字使用“卡片”和“延伸”，仍沿用 `node` / `edge` 字段，保持 v1 兼容。
 
+## MCP 接入
+
+```text
+本机 AI 客户端
+  → scripts/mcp-server.mjs（官方 SDK，MCP stdio）
+  → scripts/mcp-bridge.mjs（127.0.0.1 HTTP，临时令牌和请求队列）
+  → src/canvas/mcp-ui.js（授权页面轮询）
+  → app.js / mcp-model.js（版本、原子校验、保存和撤销）
+  → 当前浏览器 localStorage
+```
+
+`mcp-server.mjs` 仅注册读取、编辑及连接状态三个工具，通过环境变量接收本机 URL 与客户端令牌。它不直接读取磁盘备份或浏览器存储；标准输出仅承载 MCP 消息。官方服务端 SDK 为运行依赖，客户端 SDK 为实际 stdio 测试的开发依赖，均锁定在 2.3.1。
+
+`mcp-bridge.mjs` 按需由本机服务加载，使用不同的页面令牌和 AI 客户端令牌，校验 Host / Origin、工具与只读权限；只在进程内保留会话、请求及短暂结果，不写画布文件。授权绑定当前画布，最长一小时，页面心跳中断超过十秒或主动断开即失效；每项请求十五秒过期。
+
+`app.js` 保留数据所有权：获取同源写锁后检查编辑和保存状态，在副本上执行操作；异步摘要完成后重新检查捕获的原会话授权、请求期限和全工作区指纹，再通过 `save(expectedRaw)` 比较保存。只有保存成功才替换内存并新增一次撤销记录；期间修改、断开、切换、超时、损坏数据或跨页冲突均不能被 AI 静默覆盖。完整接口与生命周期见 [MCP 接入指南](mcp.md)。
+
 ## 旧六步工具
 
 `src/guided/app.js` 负责旧界面和保存协调，`model.js` 负责旧格式及导入导出，`logic.js` 负责计算、删除解除关联及变更检测，`styles.css` 保留旧视觉。该入口使用自己的存储键与 schema，不读取自由画布数据，也不作为新版交互的扩展基础。
 
 ## 开发工具
 
-`scripts/dev-server.mjs` 提供仅监听 `127.0.0.1` 的静态服务，公开两个 HTML 入口、`src/` 和 `assets/`，并提供供启动脚本核对目录的身份信息。Git 元数据、项目文档、测试和个人备份不作为静态资源公开。
+`scripts/dev-server.mjs` 提供仅监听 `127.0.0.1` 的静态服务，公开两个 HTML 入口、`src/` 和 `assets/`，提供供启动脚本核对目录的身份信息，并按需接入 `/api/mcp/` 临时桥。该内部 HTTP 接口不是远程 MCP 传输端点。Git 元数据、项目文档、测试和个人备份不作为静态资源公开。
 
-`scripts/check.mjs` 汇总项目语法与静态引用检查。测试使用 Node 内置测试运行器，不依赖打包器或第三方测试框架。启动、测试和界面检查方式见 [开发与验证](development.md)。
+`scripts/check.mjs` 汇总项目语法与静态引用检查。测试使用 Node 内置测试运行器，不依赖打包器或第三方测试框架；MCP 协议集成测试使用官方客户端 SDK。启动、测试和界面检查方式见 [开发与验证](development.md)。

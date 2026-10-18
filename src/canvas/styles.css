@@ -660,6 +660,132 @@ a {
 .help-pop a {
   color: #7e9277;
 }
+.mcp-panel {
+  top: 16px;
+  right: 20px;
+  z-index: 13;
+  width: 344px;
+  max-width: calc(100% - 24px);
+  max-height: calc(100% - 32px);
+  padding: 18px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.mcp-panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.mcp-panel h2 {
+  font-size: 17px;
+  color: #36573b;
+}
+.mcp-panel-close {
+  padding: 0 7px;
+  font-size: 23px;
+  line-height: 1.4;
+}
+.mcp-description,
+.mcp-notice,
+.mcp-configuration p {
+  color: #6e8068;
+}
+.mcp-scope {
+  margin-top: 12px;
+  font-weight: 600;
+}
+.mcp-permission {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+}
+.mcp-permission select {
+  min-width: 118px;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+  padding: 6px 10px;
+}
+.mcp-panel select:focus-visible,
+.mcp-panel textarea:focus-visible,
+.mcp-panel summary:focus-visible {
+  outline: 3px solid #9bc0a7;
+  outline-offset: 3px;
+}
+.mcp-notice {
+  margin-top: 10px;
+  font-size: 11px;
+}
+.mcp-status {
+  margin-top: 12px;
+  color: #28654e;
+}
+.mcp-status.error {
+  color: #a25342;
+}
+.mcp-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.mcp-actions button,
+.mcp-configuration button {
+  min-height: 36px;
+  padding: 7px 11px;
+}
+.mcp-configuration {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.mcp-configuration summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.mcp-configuration p {
+  margin-top: 10px;
+  font-size: 11px;
+}
+.mcp-config-text {
+  display: block;
+  width: 100%;
+  min-height: 170px;
+  max-height: 300px;
+  margin: 10px 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f7f9f3;
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  resize: vertical;
+  white-space: pre;
+  overflow: auto;
+}
+#ai-menu-toggle.mcp-connected {
+  color: var(--green);
+  background: #eef5eb;
+}
+#ai-menu-toggle.mcp-connected::after {
+  content: '';
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-left: 5px;
+  vertical-align: middle;
+  border-radius: 50%;
+  background: var(--green);
+}
 .hidden,
 [hidden] {
   display: none !important;
@@ -798,6 +924,10 @@ dialog .actions {
     right: 12px;
     max-height: calc(100dvh - 150px);
   }
+  .mcp-panel {
+    right: 12px;
+    padding: 16px;
+  }
   .recovery {
     left: 12px;
     right: 12px;
@@ -853,6 +983,11 @@ dialog .actions {
   .selection-tools > button,
   .popup-menu > button,
   .zoom button {
+    min-height: 44px;
+  }
+  .mcp-panel button,
+  .mcp-permission select,
+  .mcp-configuration summary {
     min-height: 44px;
   }
   .toolbar button,
