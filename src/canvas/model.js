@@ -66,6 +66,25 @@ export function connect(board, from, to) {
   return edge;
 }
 
+/** A sibling shares incoming parents; independent cards stay independent. */
+export function createSibling(board, sourceId, x, y) {
+  const source = board.nodes.find((node) => node.id === sourceId);
+  if (!source || board.nodes.length >= LIMITS.nodes) return null;
+  const parents = [...new Set(
+    board.edges.filter((edge) => edge.to === sourceId).map((edge) => edge.from)
+  )];
+  if (board.edges.length + parents.length > LIMITS.edges) return null;
+
+  const node = createNode('', x, y, source.color);
+  const draft = { nodes: [...board.nodes, node], edges: [...board.edges] };
+  for (const parentId of parents) {
+    if (!connect(draft, parentId, node.id)) return null;
+  }
+  board.nodes.push(node);
+  board.edges.push(...draft.edges.slice(board.edges.length));
+  return node;
+}
+
 /** Delete in place, including all incoming and outgoing links. */
 export function deleteNode(board, id) {
   const found = board.nodes.find((n) => n.id === id);

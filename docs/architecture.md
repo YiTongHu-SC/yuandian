@@ -40,9 +40,9 @@ GitHub Pages 的产物由 `scripts/build-pages.mjs` 复制到已忽略的 `dist/
 | 模块 | 职责 |
 | --- | --- |
 | `src/canvas/app.js` | DOM 渲染、输入和拖动事件、当前选择、菜单与必要确认、保存状态与跨页协调 |
-| `src/canvas/model.js` | 工作区 / 画布 / 节点 / 连线数据，校验、追加导入、JSON 导出和存储保护 |
+| `src/canvas/model.js` | 工作区 / 画布 / 节点 / 连线数据、共父同级卡片的原子创建，校验、追加导入、JSON 导出和存储保护 |
 | `src/canvas/history.js` | 按画布隔离的会话撤销与重做记录 |
-| `src/canvas/geometry.js` | 视图坐标换算、坐标限幅与连接曲线等纯计算 |
+| `src/canvas/geometry.js` | 视图坐标换算、坐标限幅、连接曲线与按方向选择卡片等纯计算 |
 | `src/canvas/mcp-model.js` | MCP 编辑白名单与 JSON Schema、内容版本、原子操作及最终 v1 校验；无 DOM 或存储 |
 | `src/canvas/mcp-workspace-model.js` | 跨画布列举、按 ID 读取和编辑、新建、兼容 JSON 导出、工作区版本；复用卡片模型，无 DOM 或存储 |
 | `src/canvas/mcp-connection.js` | 允许接入的来源与路径、固定中继地址、本机 / 远程参数及 Codex TOML 生成 |

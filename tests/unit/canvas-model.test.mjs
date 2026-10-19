@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CANVAS_KEY, VERSION, LIMITS, createWorkspace, createBoard, createNode, connect, deleteNode, validateWorkspace, parseImport, importAppend, load, save, exportJSON } from '../../src/canvas/model.js';
+import { CANVAS_KEY, VERSION, LIMITS, createWorkspace, createBoard, createNode, connect, createSibling, deleteNode, validateWorkspace, parseImport, importAppend, load, save, exportJSON } from '../../src/canvas/model.js';
 
 const copy = value => JSON.parse(JSON.stringify(value));
 function storage(raw = null) {
@@ -92,6 +92,85 @@ test('connect supports free graph relationships but rejects invalid links', () =
   assert.ok(connect(board, b.id, a.id));
   assert.ok(connect(board, b.id, c.id));
   assert.ok(connect(board, c.id, a.id));
+  assert.equal(parseImport(board).ok, true);
+});
+
+test('siblings of independent cards stay independent and inherit only color', () => {
+  const board = createBoard(), source = board.nodes[0];
+  source.text = '已有内容'; source.color = 'rose';
+  const child = createNode('下一级', 300, 100);
+  board.nodes.push(child); connect(board, source.id, child.id);
+  const sibling = createSibling(board, source.id, -90, 200);
+  assert.deepEqual(sibling, { id: sibling.id, text: '', x: -90, y: 200, color: 'rose' });
+  assert.equal(board.nodes.at(-1), sibling);
+  assert.deepEqual(board.edges.map(edge => [edge.from, edge.to]), [[source.id, child.id]]);
+  assert.deepEqual(parseImport(exportJSON(board)).value.boards[0], board);
+});
+
+test('siblings share every incoming parent through multi-parent and circular relationships', () => {
+  const board = createBoard(), source = board.nodes[0];
+  const first = createNode('父卡片一', -300, 0), second = createNode('父卡片二', -300, 200);
+  board.nodes.push(first, second);
+  connect(board, first.id, source.id); connect(board, second.id, source.id);
+  connect(board, source.id, first.id);
+  const original = copy(board), sibling = createSibling(board, source.id, 0, 240);
+  assert.deepEqual(board.edges.slice(0, original.edges.length), original.edges);
+  assert.deepEqual(board.edges.slice(original.edges.length).map(edge => [edge.from, edge.to]),
+    [[first.id, sibling.id], [second.id, sibling.id]]);
+  const imported = importAppend(createWorkspace(), exportJSON(board));
+  assert.equal(imported.ok, true);
+  assert.deepEqual(imported.workspace.boards[1], board);
+  assert.equal(Object.hasOwn(sibling, 'level'), false);
+});
+
+test('sibling creation deduplicates incoming parents before adding their new links', () => {
+  const board = createBoard(), source = board.nodes[0], parent = createNode();
+  board.nodes.push(parent);
+  const edge = connect(board, parent.id, source.id);
+  board.edges.push({ ...edge, id: 'duplicate-parent' });
+  const sibling = createSibling(board, source.id, 0, 200);
+  assert.equal(board.edges.filter(edge => edge.to === sibling.id).length, 1);
+});
+
+test('sibling creation refuses node and edge capacity overflow without partial changes', () => {
+  const fullNodes = createBoard();
+  while (fullNodes.nodes.length < LIMITS.nodes) fullNodes.nodes.push(createNode());
+  const nodesBefore = copy(fullNodes);
+  assert.equal(createSibling(fullNodes, fullNodes.nodes[0].id, 0, 0), null);
+  assert.deepEqual(fullNodes, nodesBefore);
+
+  const fullEdges = createBoard(), source = fullEdges.nodes[0];
+  for (let i = 0; i < 26; i++) fullEdges.nodes.push(createNode());
+  connect(fullEdges, fullEdges.nodes[1].id, source.id);
+  connect(fullEdges, fullEdges.nodes[2].id, source.id);
+  for (const from of fullEdges.nodes.slice(1)) {
+    for (const to of fullEdges.nodes.slice(1)) {
+      if (fullEdges.edges.length < LIMITS.edges - 1) connect(fullEdges, from.id, to.id);
+    }
+  }
+  assert.equal(fullEdges.edges.length, LIMITS.edges - 1);
+  const edgesBefore = copy(fullEdges);
+  assert.equal(createSibling(fullEdges, source.id, 0, 200), null);
+  assert.deepEqual(fullEdges, edgesBefore);
+});
+
+test('sibling creation fits exact edge capacity and validates positions before mutating', () => {
+  const board = createBoard(), source = board.nodes[0], parent = createNode();
+  board.nodes.push(parent); connect(board, parent.id, source.id);
+  const before = copy(board);
+  assert.equal(createSibling(board, 'missing', 0, 0), null);
+  assert.throws(() => createSibling(board, source.id, Infinity, 0), TypeError);
+  assert.throws(() => createSibling(board, source.id, 0, LIMITS.coordinate + 1), TypeError);
+  assert.deepEqual(board, before);
+  for (let i = 0; i < 24; i++) board.nodes.push(createNode());
+  for (const from of board.nodes.slice(1)) {
+    for (const to of board.nodes.slice(1)) {
+      if (board.edges.length < LIMITS.edges - 1) connect(board, from.id, to.id);
+    }
+  }
+  assert.equal(board.edges.length, LIMITS.edges - 1);
+  assert.ok(createSibling(board, source.id, 0, 200));
+  assert.equal(board.edges.length, LIMITS.edges);
   assert.equal(parseImport(board).ok, true);
 });
 

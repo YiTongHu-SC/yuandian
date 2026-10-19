@@ -6,6 +6,7 @@ import {
   createWorkspace,
   createBoard,
   createNode,
+  createSibling,
   connect,
   deleteNode,
   parseImport,
@@ -30,6 +31,8 @@ import {
   coordinate as xy,
   worldPoint as clientToWorld,
   connectionCurve,
+  directionalNode,
+  NODE_WIDTH,
   NODE_HEIGHT
 } from './geometry.js';
 
@@ -590,16 +593,11 @@ function renderBoard() {
             textCursor(el.querySelector('.idea-text'), e.clientX, e.clientY)
           );
         },
-        onKeydown: (e) => {
-          if (e.target.tagName === 'TEXTAREA') return;
-          if (e.key === 'Enter') {
-            e.preventDefault();
-            beginEdit(n.id);
-          } else if (e.key === 'Tab' && !e.shiftKey) {
-            e.preventDefault();
-            selection = { kind: 'node', id: n.id };
-            addBranch();
-          }
+        onFocus: (e) => {
+          if (e.target !== e.currentTarget) return;
+          selection = { kind: 'node', id: n.id };
+          updateTools();
+          renderEdges();
         }
       },
       text
@@ -1001,18 +999,56 @@ function addBranch() {
   reveal(n);
   beginEdit(n.id);
 }
+function addSibling() {
+  finishEdit();
+  closeMenus();
+  const source = activeNode();
+  if (!source) return;
+  const height = nodeEls.get(source.id)?.offsetHeight || NODE_HEIGHT,
+    pos = freePosition(source.x, source.y + height + 47),
+    before = snapshot(),
+    n = createSibling(board(), source.id, xy(pos.x), xy(pos.y));
+  if (!n) {
+    nodeEls.get(source.id)?.focus({ preventScroll: true });
+    void flush();
+    return note('当前画布已达容量上限，无法新增同级卡片。');
+  }
+  pushHistory(before);
+  selection = { kind: 'node', id: n.id };
+  cancelConnect();
+  markDirty();
+  renderBoard();
+  reveal(n);
+  beginEdit(n.id);
+}
+function moveSelection(key) {
+  const heights = new Map(
+      [...nodeEls].map(([id, el]) => [id, el.offsetHeight])
+    ),
+    n = directionalNode(board().nodes, activeNode()?.id, key, heights);
+  if (!n) return;
+  selection = { kind: 'node', id: n.id };
+  cancelConnect();
+  updateTools();
+  renderEdges();
+  reveal(n);
+  nodeEls.get(n.id)?.focus({ preventScroll: true });
+}
 function reveal(n) {
   const v = board().view,
+    oldX = v.x,
+    oldY = v.y,
     w = stage.clientWidth,
     ht = stage.clientHeight,
+    height = nodeEls.get(n.id)?.offsetHeight || NODE_HEIGHT,
     nx = n.x * v.scale + v.x,
     ny = n.y * v.scale + v.y;
-  if (nx < 35 || nx + 225 * v.scale > w - 35)
-    v.x = xy(w / 2 - (n.x + 112) * v.scale);
-  if (ny < 35 || ny + 100 * v.scale > ht - 75)
-    v.y = xy(Math.max(50, ht / 2) - (n.y + 50) * v.scale);
+  if (nx < 35 || nx + NODE_WIDTH * v.scale > w - 35)
+    v.x = xy(w / 2 - (n.x + NODE_WIDTH / 2) * v.scale);
+  if (ny < 35 || ny + height * v.scale > ht - 75)
+    v.y = xy(Math.max(50, ht / 2) - (n.y + height / 2) * v.scale);
   applyView();
-  markDirty();
+  if (v.x !== oldX || v.y !== oldY) markDirty();
 }
 function textCursor(element, x, y) {
   if (!element) return;
@@ -1055,14 +1091,16 @@ function beginEdit(id, cursor) {
         e.stopPropagation();
         finishEdit();
         addBranch();
-      } else if (
-        e.key === 'Escape' ||
-        (e.key === 'Enter' && (e.ctrlKey || e.metaKey))
-      ) {
+      } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.altKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!e.repeat) addSibling();
+      } else if (e.key === 'Escape') {
         e.preventDefault();
         e.stopPropagation();
         finishEdit();
-        stage.focus();
+        void flush();
+        el.focus({ preventScroll: true });
       }
     },
     onBlur: () => {
@@ -1516,14 +1554,19 @@ function toggleHelp() {
     h(
       'p',
       {},
-      '① 双击一张卡片，直接写下想法。按 Enter 换行，点击空白结束编辑。'
+      '① 双击一张卡片，或选中后按 Enter 编辑。编辑中 Enter 换行，Esc 保存并退出，也可点击空白完成。'
     ),
     h(
       'p',
       {},
       '② 选中卡片点旁边的“＋延伸”，或按 ',
       h('kbd', {}, 'Tab'),
-      '，继续展开。拖动卡片改变组合。'
+      '，继续展开。按 Ctrl / ⌘ + Enter 新增同级卡片；没有父卡片时新增独立卡片。拖动卡片改变组合。'
+    ),
+    h(
+      'p',
+      {},
+      '选中卡片后，用 ↑ ↓ ← → 按位置切换卡片；编辑文字时方向键移动光标。'
     ),
     h(
       'p',
@@ -1662,16 +1705,26 @@ document.addEventListener('keydown', (e) => {
       removeSelected();
     }
   } else if (
-    e.key === 'Tab' &&
-    !e.shiftKey &&
-    e.target === stage &&
-    activeNode()
+    (e.target === stage || e.target.closest('.idea')) &&
+    activeNode() &&
+    !dragging
   ) {
-    e.preventDefault();
-    addBranch();
-  } else if (e.key === 'Enter' && e.target === stage && activeNode()) {
-    e.preventDefault();
-    beginEdit(activeNode().id);
+    if (
+      ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key) &&
+      !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey
+    ) {
+      e.preventDefault();
+      moveSelection(e.key);
+    } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.altKey) {
+      e.preventDefault();
+      if (!e.repeat) addSibling();
+    } else if (e.key === 'Tab' && !e.shiftKey) {
+      e.preventDefault();
+      addBranch();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      beginEdit(activeNode().id);
+    }
   }
 });
 window.addEventListener('storage', (e) => {

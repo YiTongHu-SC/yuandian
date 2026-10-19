@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   coordinate,
   worldPoint,
+  directionalNode,
   connectionCurve
 } from '../../src/canvas/geometry.js';
 import { LIMITS } from '../../src/canvas/model.js';
@@ -28,6 +29,65 @@ test('drag coordinates stop at the supported model limits', () => {
   assert.equal(coordinate(LIMITS.coordinate + 100), LIMITS.coordinate);
   assert.equal(coordinate(-LIMITS.coordinate - 100), -LIMITS.coordinate);
   assert.equal(coordinate(-123.75), -123.75);
+});
+
+test('direction keys move by card positions across a freely arranged canvas', () => {
+  const nodes = [
+    { id: 'center', x: -120, y: 80 },
+    { id: 'up', x: -140, y: -150 },
+    { id: 'down', x: -80, y: 350 },
+    { id: 'left', x: -460, y: 100 },
+    { id: 'right', x: 260, y: 20 },
+    { id: 'far-right', x: 600, y: 80 }
+  ];
+  for (const [key, id] of Object.entries({ ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' })) {
+    assert.equal(directionalNode(nodes, 'center', key).id, id);
+  }
+});
+
+test('directional navigation prefers aligned cards over near-perpendicular candidates', () => {
+  const nodes = [
+    { id: 'center', x: 0, y: 0 },
+    { id: 'below', x: 5, y: 160 },
+    { id: 'right', x: 500, y: 10 }
+  ];
+  assert.equal(directionalNode(nodes, 'center', 'ArrowRight').id, 'right');
+  assert.equal(directionalNode(nodes, 'center', 'ArrowDown').id, 'below');
+  assert.equal(directionalNode(nodes, 'right', 'ArrowLeft').id, 'center');
+});
+
+test('directional navigation uses both measured centers for tall cards', () => {
+  const nodes = [
+    { id: 'tall', x: 0, y: 0 },
+    { id: 'aligned', x: 300, y: 100 },
+    { id: 'top', x: 300, y: 0 }
+  ];
+  const heights = new Map([['tall', 298]]);
+  assert.equal(directionalNode(nodes, 'tall', 'ArrowRight', heights).id, 'aligned');
+  assert.equal(directionalNode(nodes, 'tall', 'ArrowUp', heights).id, 'top');
+  assert.equal(directionalNode(nodes, 'tall', 'ArrowDown', heights), null);
+  assert.equal(directionalNode(nodes, 'aligned', 'ArrowLeft', heights).id, 'tall');
+  assert.equal(directionalNode(nodes, 'tall', 'ArrowRight').id, 'top');
+});
+
+test('directional navigation leaves focus in place without a directional candidate', () => {
+  const nodes = [{ id: 'center', x: 0, y: 0 }, { id: 'overlap', x: 0, y: 0 }];
+  for (const key of ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']) {
+    assert.equal(directionalNode(nodes, 'center', key), null);
+  }
+  assert.equal(directionalNode(nodes, 'missing', 'ArrowRight'), null);
+  assert.equal(directionalNode([], 'missing', 'ArrowRight'), null);
+  assert.equal(directionalNode(nodes, 'center', 'Enter'), null);
+});
+
+test('directional navigation resolves equally suitable cards in stable board order', () => {
+  const nodes = [
+    { id: 'center', x: 0, y: 0 },
+    { id: 'above-right', x: 300, y: -80 },
+    { id: 'below-right', x: 300, y: 80 }
+  ];
+  assert.equal(directionalNode(nodes, 'center', 'ArrowRight').id, 'above-right');
+  assert.equal(directionalNode(nodes, 'center', 'ArrowRight').id, 'above-right');
 });
 
 test('horizontal connections attach to facing sides and honor multiline node heights', () => {

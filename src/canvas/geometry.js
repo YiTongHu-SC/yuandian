@@ -15,6 +15,39 @@ export function worldPoint(view, rect, clientX, clientY) {
   };
 }
 
+/** Move through freely placed cards using measured centers and directional alignment. */
+export function directionalNode(nodes, currentId, key, heights = new Map()) {
+  const direction = {
+    ArrowUp: [0, -1],
+    ArrowDown: [0, 1],
+    ArrowLeft: [-1, 0],
+    ArrowRight: [1, 0]
+  }[key];
+  const current = nodes.find((node) => node.id === currentId);
+  if (!direction || !current) return null;
+
+  const center = (node) => ({
+    x: node.x + NODE_WIDTH / 2,
+    y: node.y + (heights.get(node.id) || NODE_HEIGHT) / 2
+  });
+  const origin = center(current);
+  let best = null, bestScore = Infinity;
+  for (const node of nodes) {
+    if (node.id === currentId) continue;
+    const target = center(node), dx = target.x - origin.x, dy = target.y - origin.y;
+    const forward = dx * direction[0] + dy * direction[1];
+    if (forward <= 0) continue;
+    const sideways = Math.abs(dx * direction[1] - dy * direction[0]);
+    // Near-perpendicular cards should not steal a horizontal/vertical move.
+    const score = forward + sideways * 2 + sideways * sideways / forward;
+    if (score < bestScore) {
+      best = node;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
 /** Curve anchors use measured node heights, including multiline editors. */
 export function connectionCurve(
   from,
