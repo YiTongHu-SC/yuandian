@@ -1,6 +1,6 @@
 # 架构与目录
 
-这是一个可本机运行或静态托管的网页原型。浏览器直接加载 ES Modules，拥有画布数据、校验和保存职责；Node.js 提供本机服务、检查，以及可选 MCP stdio 服务和内存请求桥。浏览器端无需构建或 SDK，Node 桥不持久化画布。产品方向以 [PROJECT.md](../PROJECT.md) 为准。
+这是一个可本机运行或静态托管的网页原型。浏览器直接加载 ES Modules，拥有画布数据、校验和保存职责；Node.js 提供本机服务、检查、本机 MCP stdio 与独立远程 MCP 中继。浏览器端无需构建或 SDK，两种桥均不持久化画布。产品方向以 [PROJECT.md](../PROJECT.md) 为准。
 
 ## 内容与交互基础
 
@@ -21,7 +21,8 @@ thinking-canvas/
 ├─ tests/
 │  ├─ unit/                   模型和纯逻辑测试
 │  └─ tooling/                开发服务、MCP 桥与实际 stdio 测试
-├─ scripts/                   本机服务、MCP stdio / 桥和静态检查工具
+├─ scripts/                   本机服务、MCP stdio / 远程 HTTP / 桥和检查工具
+├─ deploy/remote-mcp/         独立 Node 服务的 systemd 与 Caddy 路由模板
 ├─ .github/workflows/         检查与 GitHub Pages 部署
 ├─ docs/                      架构、开发、数据约定
 │  └─ history/                初始化及历史验证记录
@@ -32,7 +33,7 @@ thinking-canvas/
 
 `private/`、`backups/` 是可选的个人文件位置，已从 Git 忽略，也不属于应用资源。
 
-GitHub Pages 的产物由 `scripts/build-pages.mjs` 复制到已忽略的 `dist/pages/`，仅包含两个 HTML 入口及其前端资源，不包含服务脚本、依赖、测试、Git 元数据或个人目录。入口与模块使用相对路径，支持 `/yuandian/` 项目路径。线上只运行浏览器代码，本机 HTTP 回环地址才显示 AI 接入；两种部署的 localStorage 互相独立，JSON 用于显式迁移。发布流程见 [部署说明](deployment.md)。
+GitHub Pages 的产物由 `scripts/build-pages.mjs` 复制到已忽略的 `dist/pages/`，仅包含两个 HTML 入口及其前端资源，不包含服务脚本、依赖、测试、Git 元数据或个人目录。入口与模块使用相对路径，支持 `/yuandian/` 项目路径。线上浏览器使用固定独立中继，本机 HTTP 回环地址沿用本机桥；其他来源不自动启用 AI 接入。两种部署的 localStorage 互相独立，JSON 用于显式迁移。发布流程与实际状态见 [部署说明](deployment.md)。
 
 ## 自由画布
 
@@ -43,6 +44,7 @@ GitHub Pages 的产物由 `scripts/build-pages.mjs` 复制到已忽略的 `dist/
 | `src/canvas/history.js` | 按画布隔离的会话撤销与重做记录 |
 | `src/canvas/geometry.js` | 视图坐标换算、坐标限幅与连接曲线等纯计算 |
 | `src/canvas/mcp-model.js` | MCP 编辑白名单与 JSON Schema、内容版本、原子操作及最终 v1 校验；无 DOM 或存储 |
+| `src/canvas/mcp-connection.js` | 允许接入的来源与路径、固定中继地址、本机 / 远程参数及 Codex TOML 生成 |
 | `src/canvas/mcp-ui.js` | 单张画布授权面板、临时配置、页面轮询、会话与请求期限检查 |
 | `src/canvas/styles.css` | 自由画布布局、卡片和交互视觉 |
 
@@ -63,11 +65,22 @@ GitHub Pages 的产物由 `scripts/build-pages.mjs` 复制到已忽略的 `dist/
   → src/canvas/mcp-ui.js（授权页面轮询）
   → app.js / mcp-model.js（版本、原子校验、保存和撤销）
   → 当前浏览器 localStorage
+
+线上 Codex
+  → https://stellarcore.games/yuandian-mcp/mcp（Streamable HTTP）
+  → Caddy → scripts/mcp-remote-server.mjs（127.0.0.1:4177）
+  → scripts/mcp-remote-bridge.mjs（内存授权与请求队列）
+  ← Pages 的 mcp-ui.js 主动发起 HTTPS 长轮询
+  → 同一 app.js / mcp-model.js → 当前浏览器 localStorage
 ```
 
 `mcp-server.mjs` 仅注册读取、编辑及连接状态三个工具，通过环境变量接收本机 URL 与客户端令牌。它不直接读取磁盘备份或浏览器存储；标准输出仅承载 MCP 消息。官方服务端 SDK 为运行依赖，客户端 SDK 为实际 stdio 测试的开发依赖，均锁定在 2.3.1。
 
 `mcp-bridge.mjs` 按需由本机服务加载，使用不同的页面令牌和 AI 客户端令牌，校验 Host / Origin、工具与只读权限；只在进程内保留会话、请求及短暂结果，不写画布文件。授权绑定当前画布，最长一小时，页面心跳中断超过十秒或主动断开即失效；每项请求十五秒过期。
+
+`mcp-remote-server.mjs` 提供单个回环监听，由 Caddy 终止 HTTPS 并剥离 `/yuandian-mcp` 前缀；systemd 使用独立低权限用户管理进程。`mcp-remote-bridge.mjs` 复用三工具注册和纯模型，增加远程 MCP 端点、精确 Origin / Host 校验、请求大小与速率限制、双令牌及有界内存队列。浏览器每次长轮询最多等待 20 秒，远程请求 30 秒过期、心跳失联 90 秒失效，授权最长一小时。页面实例、单画布、权限、期限共同限定会话；刷新、切换、断开及服务重启需重新授权。
+
+两种桥都只转发授权页面的内容。远程内容会经过服务器及 AI 客户端，不将浏览器数据改为云端保存；无账号、数据库、离线队列或同步。中继不记录内容和凭据，Caddy 对中继路径跳过访问日志。仅部署一个进程，不以多实例共享授权；重启使全部临时会话失效。部署模板位于 `deploy/remote-mcp/`，实际主机改动与回退方法见部署说明。
 
 `app.js` 保留数据所有权：获取同源写锁后检查编辑和保存状态，在副本上执行操作；异步摘要完成后重新检查捕获的原会话授权、请求期限和全工作区指纹，再通过 `save(expectedRaw)` 比较保存。只有保存成功才替换内存并新增一次撤销记录；期间修改、断开、切换、超时、损坏数据或跨页冲突均不能被 AI 静默覆盖。完整接口与生命周期见 [MCP 接入指南](mcp.md)。
 
