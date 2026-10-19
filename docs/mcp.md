@@ -6,6 +6,14 @@
 
 GitHub Pages 在线版仅托管静态画布，不运行 Node 服务或 MCP 桥，也不显示“AI 接入”。需要接入 AI 时运行本机版本；若要迁移线上内容，先导出 JSON，再在本机追加导入。线上与本机的画布不会自动同步。
 
+## 为什么在线版没有 AI 接入
+
+当前 MCP 链路是“AI 客户端 → 本机 stdio 进程 → 本机 HTTP 桥 → 授权画布页面”。Node 进程与桥位于 `scripts/`，不会作为静态站点文件发布。[GitHub Pages 只提供 HTML、CSS、JavaScript 静态托管](https://docs.github.com/en/pages/getting-started-with-github-pages/what-is-github-pages)，不能运行这套 Node 服务。
+
+界面因此仅在 `http://127.0.0.1` 显示“AI 接入”。在 Pages 直接恢复按钮仍会向缺少后端的 `/api/mcp/` 请求，不能得到有效授权或客户端配置。
+
+MCP 可以采用在线服务形式。若后续要求在线画布直接接入 AI，需要另行设计和实现受控的服务连接、单画布授权与浏览器消息通道；这不是当前静态部署已经具备的能力，也不是本次验证新增的功能。现在的可用路径是从线上导出 JSON、在本机原点追加导入，再开启本机 MCP 授权；AI 修改后也可导出回线上追加导入。
+
 ## 开启接入
 
 需要 Node.js 20 或以上版本，以及可在这台机器启动 stdio MCP 进程的 AI 客户端。
