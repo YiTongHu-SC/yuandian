@@ -36,7 +36,7 @@ async function until(check) {
 
 function fixture(t, { paired = false, permanent = false, handle, editCanvas, createCanvas, readCanvas,
   signChallenge, locks, storageFailure, remote = true, resumeDelayMs = 10, BroadcastChannel,
-  canConnect = () => true } = {}) {
+  canConnect = () => true, holdsTabLock = true, reload = true, loadConsent } = {}) {
   const originals = new Map();
   const nodes = [];
   const document = {
@@ -51,7 +51,7 @@ function fixture(t, { paired = false, permanent = false, handle, editCanvas, cre
   const window = new Element('window', document);
   window.location = { href: 'http://127.0.0.1:4176/' };
   window.BroadcastChannel = BroadcastChannel;
-  const identity = { pageId: crypto.randomUUID(), tabId: crypto.randomUUID(), reload: true };
+  const identity = { pageId: crypto.randomUUID(), tabId: crypto.randomUUID(), reload, holdsTabLock };
   const clientToken = '2'.repeat(64);
   const ownerToken = '1'.repeat(64);
   let stored = paired ? { version: 1, pairingId: crypto.randomUUID(), privateKey: 'private', publicKey: { kty: 'EC' } } : null;
@@ -65,7 +65,8 @@ function fixture(t, { paired = false, permanent = false, handle, editCanvas, cre
     async clear() { stored = null; consent = null; },
     async loadConsent(pairingId) {
       if (storageFailure?.load) throw new Error('永久授权记录无法使用，请断开授权后重试。');
-      return consent?.pairingId === pairingId ? structuredClone(consent) : null;
+      const record = consent?.pairingId === pairingId ? structuredClone(consent) : null;
+      return loadConsent ? loadConsent(record) : record;
     },
     async saveConsent(record) {
       if (storageFailure?.save) throw new Error('模拟永久授权保存失败');
@@ -481,6 +482,119 @@ test('永久意愿遇其他活跃页面只等待，旧连接消失后自动恢�
   assert.equal(f.calls.some(call => call.body?.parameters?.takeover === true), false);
 });
 
+test('永久授权重开确认旧标签锁已释放后立即恢复，本机与远程均不等待心跳', async t => {
+  for (const remote of [false, true]) await t.test(remote ? 'remote' : 'local', async t => {
+    const oldTab = crypto.randomUUID();
+    const oldSession = crypto.randomUUID();
+    let occupied = true;
+    let probing = false;
+    const locks = { async request(name, options, callback) {
+      if (typeof options === 'function') return options({ name });
+      assert.equal(name, `yuandian.mcp-tab:${oldTab}`);
+      assert.deepEqual(options, { ifAvailable: true });
+      probing = true;
+      try { return await callback({ name }); } finally { probing = false; }
+    } };
+    const f = fixture(t, { remote, paired: true, permanent: 'write', reload: false, locks, handle: request => {
+      if (request.route !== 'pairing/complete') return;
+      const { action, parameters } = request.action;
+      if (action === 'attach' && occupied) return json({ ok: false, code: 'page_in_use' }, 409);
+      if (action === 'status') return json({ ok: true, state: 'page_in_use',
+        activeTabId: oldTab, activeTabLock: true, activeSessionId: oldSession });
+      if (action === 'release') {
+        assert.equal(probing, true);
+        assert.equal(parameters.expectedSessionId, oldSession);
+        assert.equal(parameters.allPages, true);
+        occupied = false;
+      }
+      if (action === 'authorize') { assert.equal(probing, true); assert.equal(parameters.tabLock, true); }
+    } });
+    await until(() => f.panel.connected);
+    assert.equal(f.input('AI 接入权限').value, 'write');
+    assert.equal(f.calls.filter(c => c.route === 'pairing/complete' && c.action.action === 'attach').length, 2);
+    assert.equal(f.calls.some(c => c.body?.parameters?.takeover === true), false);
+    assert.equal(f.storeWrites.length, 0);
+  });
+});
+
+test('恢复关闭标签保留的同一tabId时使用当前已持锁证据，不等待自己释放锁', async t => {
+  let occupied = true;
+  const f = fixture(t, { paired: true, permanent: true, reload: false,
+    locks: { request(name, options) { assert.equal(typeof options, 'function'); return options({ name }); } },
+    handle: request => {
+      if (request.route !== 'pairing/complete') return;
+      if (request.action.action === 'attach' && occupied) return json({ ok: false, code: 'page_in_use' }, 409);
+      if (request.action.action === 'status') return json({ ok: true, state: 'page_in_use',
+        activeTabId: request.identity.tabId, activeTabLock: true, activeSessionId: crypto.randomUUID() });
+      if (request.action.action === 'release') occupied = false;
+    } });
+  await until(() => f.panel.connected);
+  assert.equal(f.calls.some(c => c.body?.parameters?.takeover === true), false);
+});
+
+test('活页持锁、旧会话无锁标记或锁检查失败均不自动撤销，有限授权也不回收', async t => {
+  for (const situation of ['live', 'legacy', 'missing-tab', 'invalid-session', 'unheld', 'lock-error', 'finite'])
+    await t.test(situation, async t => {
+      let checked = false;
+      const f = fixture(t, { paired: true, permanent: situation !== 'finite', holdsTabLock: situation !== 'unheld',
+        locks: { request(name, options, callback) {
+          if (typeof options === 'function') return options({ name });
+          if (situation === 'lock-error') throw new Error('锁检查失败');
+          return callback(null);
+        } }, handle: request => {
+          if (request.route !== 'pairing/complete') return;
+          if (request.action.action === 'attach') { checked = true; return json({ ok: false, code: 'page_in_use' }, 409); }
+          if (request.action.action === 'status') return json({ ok: true, state: 'page_in_use',
+            activeTabId: situation === 'missing-tab' ? undefined : crypto.randomUUID(),
+            activeTabLock: situation !== 'legacy', activeSessionId: situation === 'invalid-session' ? 'invalid' : crypto.randomUUID() });
+        } });
+      await until(() => checked && !f.button('改由此页授权').disabled);
+      assert.equal(f.panel.connected, false);
+      assert.equal(f.calls.some(c => c.route === 'pairing/challenge' && ['release', 'authorize'].includes(c.body.action)), false);
+    });
+});
+
+test('关闭证据检查后会话变化时条件释放失败，不继续attach或恢复授权', async t => {
+  const f = fixture(t, { paired: true, permanent: true, handle: request => {
+    if (request.route !== 'pairing/complete') return;
+    if (request.action.action === 'attach') return json({ ok: false, code: 'page_in_use' }, 409);
+    if (request.action.action === 'status') return json({ ok: true, state: 'page_in_use',
+      activeTabId: crypto.randomUUID(), activeTabLock: true, activeSessionId: crypto.randomUUID() });
+    if (request.action.action === 'release') return json({ ok: false, code: 'authorization_changed', error: '授权已更新' }, 409);
+  } });
+  await until(() => /授权已更新/u.test(f.document.querySelector('.mcp-status').textContent));
+  assert.equal(f.calls.filter(c => c.route === 'pairing/complete' && c.action.action === 'attach').length, 1);
+  assert.equal(f.calls.some(c => c.route === 'pairing/challenge' && c.body.action === 'authorize'), false);
+});
+
+test('关闭锁恢复等待存储期间主动断开，迟到的旧意愿不能释放或恢复会话', async t => {
+  let reads = 0;
+  let waiting = false;
+  let cancelled = false;
+  let finish;
+  const pending = new Promise(resolve => { finish = resolve; });
+  const f = fixture(t, { paired: true, permanent: 'write', locks: serialLocks(),
+    loadConsent: async record => {
+      if (++reads === 3) { waiting = true; await pending; }
+      return record;
+    }, handle: request => {
+      if (request.route !== 'pairing/complete') return;
+      if (request.action.action === 'attach') return json({ ok: false, code: 'page_in_use' }, 409);
+      if (request.action.action === 'status') return json(cancelled
+        ? { ok: true, state: 'needs_authorization' }
+        : { ok: true, state: 'page_in_use', activeTabId: crypto.randomUUID(),
+          activeTabLock: true, activeSessionId: crypto.randomUUID() });
+    } });
+  await until(() => waiting);
+  cancelled = true;
+  const stopping = f.button('断开授权').emit('click');
+  finish();
+  await stopping;
+  assert.equal(f.consent(), null);
+  assert.equal(f.panel.connected, false);
+  assert.equal(f.calls.some(c => c.route === 'pairing/challenge' && ['release', 'authorize'].includes(c.body.action)), false);
+});
+
 test('恢复签名等待时主动断开，等待锁前立即失效且迟到签名不能复活', async t => {
   let signing = false;
   let finish;
@@ -587,7 +701,7 @@ test('离线页主动断开先清意愿，再按签名状态中的 sessionId 条
       return json({ ok: false, code: 'page_in_use', error: '另一页面正在授权' }, 409);
     if (request.route === 'pairing/complete' && request.action.action === 'status')
       return json({ ok: true, state: 'page_in_use', activeSessionId });
-    if (request.route === 'pairing/challenge' && request.body.action === 'status')
+    if (request.route === 'pairing/challenge' && request.body.action === 'release')
       assert.equal(f.consent(), null);
   } });
   await until(() => f.button('改由此页授权')?.hidden === false);

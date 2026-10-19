@@ -244,7 +244,7 @@ export function createRemoteMcpBridge({
     return {
       ok: true, paired: true, connected: false, scope: 'workspace',
       state: session ? 'page_in_use' : page?.state || 'needs_authorization',
-      ...(session ? { activePage: true, activeSessionId: session.sessionId } : {})
+      ...(session ? { activePage: true, activeSessionId: session.sessionId, activeTabId: session.tabId, activeTabLock: session.tabLock === true } : {})
     };
   }
 
@@ -301,9 +301,9 @@ export function createRemoteMcpBridge({
       return exactKeys(parameters, ['pageId', 'tabId']) && page();
     if (action === 'attach') return exactKeys(parameters, ['pageId', 'tabId', 'reload', 'takeover']) && page() &&
       typeof parameters.reload === 'boolean' && typeof parameters.takeover === 'boolean';
-    if (action === 'authorize') return exactKeys(parameters, ['pageId', 'tabId', 'mode', 'durationMs', 'takeover']) && page() &&
+    if (action === 'authorize') return exactKeys(parameters, ['pageId', 'tabId', 'mode', 'durationMs', 'takeover', 'tabLock']) && page() &&
       ['read', 'write'].includes(parameters.mode) && validMcpDuration(parameters.durationMs) &&
-      typeof parameters.takeover === 'boolean';
+      typeof parameters.takeover === 'boolean' && (parameters.tabLock === undefined || parameters.tabLock === true);
     return false;
   }
 
@@ -375,7 +375,7 @@ export function createRemoteMcpBridge({
     if (sessions.size >= maxSessions)
       return json(429, failure('session_limit', '连接过多，请先断开不用的连接。'));
     const session = {
-      scope: 'workspace', pairingId, sessionId: randomUUID(), pageId: parameters.pageId, tabId: parameters.tabId, mode: parameters.mode,
+      scope: 'workspace', pairingId, sessionId: randomUUID(), pageId: parameters.pageId, tabId: parameters.tabId, tabLock: parameters.tabLock === true, mode: parameters.mode,
       ownerToken: randomBytes(32).toString('hex'),
       expiresAt: parameters.durationMs === null ? null : now() + Math.min(parameters.durationMs, sessionTtlMs), heartbeat: now(),
       pending: new Map(), acknowledged: new Map(), poll: null

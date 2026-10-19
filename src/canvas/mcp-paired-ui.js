@@ -289,6 +289,33 @@ export function createPairedMcpPanel({
     return first?.consentId === second?.consentId && first?.pairingId === second?.pairingId && first?.mode === second?.mode;
   }
 
+  async function restoreClosedPage(ticket, saved, resume) {
+    if (!saved || !identity.holdsTabLock || !navigator.locks?.request) return false;
+    const observed = await signed('status', {
+      pageId: identity.pageId, tabId: identity.tabId
+    }, pairing, true);
+    const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
+    if (observed?.state !== 'page_in_use' || observed.activeTabLock !== true ||
+        !uuid.test(observed.activeTabId || '') || !uuid.test(observed.activeSessionId || '')) return false;
+    const recover = async () => {
+      const current = await storedConsent();
+      if (ticket !== generation || pageHidden || !sameConsent(saved, current)) return false;
+      // The browser releases document locks even if pagehide/disconnect never ran.
+      // Revoke only the observed session; a newer grant must survive this proof.
+      await signed('release', { pageId: identity.pageId, tabId: identity.tabId,
+        allPages: true, expectedSessionId: observed.activeSessionId }, pairing, true);
+      const remaining = await storedConsent();
+      if (ticket !== generation || pageHidden || !sameConsent(saved, remaining)) return false;
+      await resume();
+      return true;
+    };
+    // A restored tab may retain its slot without navigation.type === 'reload'.
+    // Its already-held exclusive lock is the same evidence as a successful probe.
+    if (observed.activeTabId === identity.tabId) return recover();
+    return navigator.locks.request(`yuandian.mcp-tab:${observed.activeTabId}`,
+      { ifAvailable: true }, lock => lock ? recover() : false);
+  }
+
   async function boot() {
     const ticket = generation;
     try {
@@ -327,18 +354,25 @@ export function createPairedMcpPanel({
           feedback('当前浏览器不支持安全恢复永久授权，请使用支持 Web Locks 的浏览器；也可主动断开。', true);
           return;
         }
-        const attached = await signed('attach', {
-          pageId: identity.pageId, tabId: identity.tabId, reload: identity.reload, takeover: false
-        }, pairing, true);
-        if (ticket !== generation) return;
-        // Only the first attach may use navigation's reload evidence.
-        identity.reload = false;
-        pageInUse = attached?.state === 'page_in_use';
-        if (pageInUse) { feedback('当前接入由另一页面提供，可继续等待或明确改由此页授权。'); return; }
-        if (!saved) { feedback('已配对 · 点击重新授权即可接入。'); return; }
-        const refusal = allowed();
-        if (refusal) { feedback(`${refusal}，永久授权保留，稍后自动连接。`, true); return; }
-        await openSession(ticket, saved.mode, null, false, saved);
+        const resume = async () => {
+          if (ticket !== generation || pageHidden) return;
+          const attached = await signed('attach', {
+            pageId: identity.pageId, tabId: identity.tabId, reload: identity.reload, takeover: false
+          }, pairing, true);
+          if (ticket !== generation) return;
+          // Only the first attach may use navigation's reload evidence.
+          identity.reload = false;
+          pageInUse = attached?.state === 'page_in_use';
+          if (pageInUse) throw Object.assign(new Error('另一页面正在授权。'), { code: 'page_in_use' });
+          if (!saved) { feedback('已配对 · 点击重新授权即可接入。'); return; }
+          const refusal = allowed();
+          if (refusal) { feedback(`${refusal}，永久授权保留，稍后自动连接。`, true); return; }
+          await openSession(ticket, saved.mode, null, false, saved);
+        };
+        try { await resume(); }
+        catch (error) {
+          if (error.code !== 'page_in_use' || !await restoreClosedPage(ticket, saved, resume)) throw error;
+        }
       });
     } catch (error) {
       if (ticket !== generation) return;
@@ -359,7 +393,8 @@ export function createPairedMcpPanel({
     if (restoring && !sameConsent(restoring, await storedConsent())) return;
     if (ticket !== generation || pageHidden) return;
     const opened = await signed('authorize', {
-      pageId: identity.pageId, tabId: identity.tabId, mode: permission, durationMs, takeover
+      pageId: identity.pageId, tabId: identity.tabId, mode: permission, durationMs, takeover,
+      ...(identity.holdsTabLock ? { tabLock: true } : {})
     }, pairing, true);
     if (ticket !== generation || pageHidden || allowed() ||
         (restoring && !sameConsent(restoring, await storedConsent()))) {

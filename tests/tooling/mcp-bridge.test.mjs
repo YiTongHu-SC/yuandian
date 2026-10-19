@@ -594,6 +594,10 @@ test('本机配对严格校验来源与挑战，另一页面不能静默接管�
   const otherStatus = await paired.signed('status', otherPage);
   assert.equal(otherStatus.value.state, 'page_in_use');
   assert.equal(otherStatus.value.activeSessionId, first.value.activeSessionId);
+  assert.equal(otherStatus.value.activeTabId, firstPage.tabId);
+  assert.equal(otherStatus.value.activeTabLock, false);
+  for (const tabLock of [false, null, 0, 1, 'true', {}, []])
+    assert.equal((await paired.signed('authorize', { ...otherPage, mode: 'write', durationMs: null, takeover: false, tabLock })).status, 400);
   const sameTabReload = { pageId: randomUUID(), tabId: firstPage.tabId };
   const attached = await paired.signed('attach', { ...sameTabReload, reload: true, takeover: false });
   assert.equal(attached.status, 200);
@@ -658,15 +662,48 @@ test('真实 stdio 固定配对跨刷新、关闭重开及本机服务重启恢�
   const status = async () => (await client.callTool({ name: 'connection_status', arguments: {} })).structuredContent;
   assert.equal((await status()).state, 'needs_authorization');
   const firstPage = { pageId: randomUUID(), tabId: randomUUID() };
-  const first = (await paired.signed('authorize', { ...firstPage, mode: 'write', durationMs: null, takeover: false })).value;
+  const first = (await paired.signed('authorize', { ...firstPage, mode: 'write', durationMs: null, takeover: false, tabLock: true })).value;
   assert.equal((await status()).mode, 'write');
-  await api('disconnect', { token: first.ownerToken, body: {} });
-  assert.equal((await status()).connected, false);
+  const abandonedEdit = client.callTool({ name: 'edit_canvas', arguments: {
+    boardId: 'fictional', expectedRevision: 'a'.repeat(64), operations: [{ op: 'create_card', text: '关闭后不能重放' }]
+  } });
+  let oldRequest;
+  for (let attempt = 0; attempt < 100 && !oldRequest; attempt++) {
+    oldRequest = (await api('poll', { token: first.ownerToken })).value;
+    if (!oldRequest) await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(oldRequest.tool, 'edit_canvas');
+  // A closing document may miss disconnect; its signed status identifies the old
+  // tab so the browser can verify its lifetime lock before releasing this session.
   const reopened = { pageId: randomUUID(), tabId: randomUUID() };
-  await paired.signed('attach', { ...reopened, reload: false, takeover: false });
-  const restored = (await paired.signed('authorize', { ...reopened, mode: 'write', durationMs: null, takeover: false })).value;
+  assert.equal((await paired.signed('attach', { ...reopened, reload: false, takeover: false })).status, 409);
+  const abandoned = (await paired.signed('status', reopened)).value;
+  assert.equal(abandoned.state, 'page_in_use');
+  assert.equal(abandoned.activeTabId, firstPage.tabId);
+  assert.equal(abandoned.activeTabLock, true);
+  assert.equal(abandoned.activeSessionId, first.activeSessionId);
+  const releaseAbandoned = { ...reopened, allPages: true, expectedSessionId: abandoned.activeSessionId };
+  assert.equal((await paired.signed('release', releaseAbandoned)).status, 200);
+  assert.equal((await abandonedEdit).structuredContent.code, 'disconnected');
+  assert.equal((await api('poll', { token: first.ownerToken })).status, 401);
+  assert.equal((await api('result', { token: first.ownerToken, body: { requestId: oldRequest.requestId, result: { ok: true } } })).status, 401);
+  assert.equal((await status()).state, 'needs_authorization');
+  assert.equal((await paired.signed('attach', { ...reopened, reload: false, takeover: false })).status, 200);
+  const restored = (await paired.signed('authorize', { ...reopened, mode: 'write', durationMs: null, takeover: false, tabLock: true })).value;
   assert.notEqual(restored.ownerToken, first.ownerToken);
   assert.equal((await status()).mode, 'write');
+  assert.equal((await paired.signed('release', releaseAbandoned)).value.code, 'authorization_changed');
+  assert.equal((await status()).activeSessionId, restored.activeSessionId);
+  assert.equal((await api('result', { token: restored.ownerToken, body: { requestId: oldRequest.requestId, result: { ok: true } } })).status, 404);
+  const reopenedRead = client.callTool({ name: 'get_canvas', arguments: {} });
+  let resumedRequest;
+  for (let attempt = 0; attempt < 100 && !resumedRequest; attempt++) {
+    resumedRequest = (await api('poll', { token: restored.ownerToken })).value;
+    if (!resumedRequest) await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(resumedRequest.tool, 'get_canvas');
+  await api('result', { token: restored.ownerToken, body: { requestId: resumedRequest.requestId, result: { ok: true, board: { id: 'fictional' } } } });
+  assert.equal((await reopenedRead).structuredContent.board.id, 'fictional');
   server.closeAllConnections();
   await new Promise(resolve => server.close(resolve));
   server = await startDevServer({ port, pairingStorePath });

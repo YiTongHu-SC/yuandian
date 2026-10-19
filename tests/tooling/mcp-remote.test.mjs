@@ -720,6 +720,9 @@ test('刷新、跨页接管和自然期限只撤销临时授权，已交付编�
   const delivered = (await poll(first.ownerToken)).value;
   const otherPage = { pageId: randomUUID(), tabId: randomUUID() };
   assert.equal((await paired.complete('attach', { ...otherPage, reload: false, takeover: false })).value.code, 'page_in_use');
+  const legacyStatus = (await paired.complete('status', otherPage)).value;
+  assert.equal(legacyStatus.activeTabId, page.tabId);
+  assert.equal(legacyStatus.activeTabLock, false);
   assert.equal((await paired.complete('authorize', { ...otherPage, mode: 'read', durationMs: 60000, takeover: false })).status, 409);
   assert.equal((await paired.complete('release', otherPage)).status, 409);
   const refresh = { pageId: randomUUID(), tabId: page.tabId };
@@ -745,32 +748,50 @@ test('刷新、跨页接管和自然期限只撤销临时授权，已交付编�
   assert.equal((await api('poll', { token: takeover.ownerToken })).status, 401);
 });
 
-test('跨页主动断开必须匹配观察到的会话，延迟撤销不能撤掉后续授权', async (t) => {
+test('跨页释放关闭后遗留的会话立即恢复原 SDK，旧 owner、请求和延迟释放不能影响新授权', async (t) => {
   const { api, connect, poll } = await fixture(t);
   const paired = await pair(api);
   const page = { pageId: randomUUID(), tabId: randomUUID() };
   const other = { pageId: randomUUID(), tabId: randomUUID() };
   const client = await connect(paired);
-  const first = (await paired.complete('authorize', { ...page, mode: 'write', durationMs: null, takeover: false })).value;
+  const first = (await paired.complete('authorize', { ...page, mode: 'write', durationMs: null, takeover: false, tabLock: true })).value;
   const observed = await paired.complete('status', other);
   assert.equal(observed.value.state, 'page_in_use');
   assert.match(observed.value.activeSessionId, /^[a-f0-9-]{36}$/u);
+  assert.equal(observed.value.activeTabId, page.tabId);
+  assert.equal(observed.value.activeTabLock, true);
   const parameters = { ...other, allPages: true, expectedSessionId: observed.value.activeSessionId };
   const delayed = await paired.proof('release', parameters);
-  const next = (await paired.complete('authorize', { ...page, mode: 'write', durationMs: null, takeover: false })).value;
+  const next = (await paired.complete('authorize', { ...page, mode: 'write', durationMs: null, takeover: false, tabLock: true })).value;
   assert.notEqual(next.ownerToken, first.ownerToken);
   assert.equal((await api('pairing/complete', { body: delayed })).value.code, 'authorization_changed');
   assert.equal((await client.callTool({ name: 'connection_status', arguments: {} })).structuredContent.connected, true);
   const current = (await paired.complete('status', other)).value;
+  assert.equal(current.activeTabId, page.tabId);
+  assert.equal(current.activeTabLock, true);
   const pending = client.callTool({ name: 'edit_canvas', arguments: {
     boardId: 'fictional', expectedRevision: 'c'.repeat(64), operations: [{ op: 'create_card', text: '不能继续旧请求' }]
   } });
   const request = (await poll(next.ownerToken)).value;
   assert.equal((await paired.complete('release', { ...parameters, expectedSessionId: current.activeSessionId })).status, 200);
   assert.equal((await pending).structuredContent.code, 'disconnected');
+  assert.equal((await api('poll', { token: next.ownerToken })).status, 401);
   assert.equal((await api('result', { token: next.ownerToken, body: { requestId: request.requestId, result: { ok: true } } })).status, 401);
   assert.equal((await client.callTool({ name: 'connection_status', arguments: {} })).structuredContent.connected, false);
   assert.equal((await paired.complete('release', { ...parameters, expectedSessionId: current.activeSessionId })).status, 200);
+  assert.equal((await paired.complete('attach', { ...other, reload: false, takeover: false })).status, 200);
+  const restored = (await paired.complete('authorize', { ...other, mode: 'write', durationMs: null, takeover: false, tabLock: true })).value;
+  const restoredStatus = (await client.callTool({ name: 'connection_status', arguments: {} })).structuredContent;
+  assert.equal(restoredStatus.mode, 'write');
+  assert.equal(restoredStatus.expiresAt, null);
+  assert.notEqual(restoredStatus.activeSessionId, current.activeSessionId);
+  assert.equal((await paired.complete('release', { ...parameters, expectedSessionId: current.activeSessionId })).value.code, 'authorization_changed');
+  assert.equal((await api('result', { token: restored.ownerToken, body: { requestId: request.requestId, result: { ok: true } } })).status, 404);
+  const reading = client.callTool({ name: 'get_canvas', arguments: {} });
+  const readRequest = (await poll(restored.ownerToken)).value;
+  assert.equal(readRequest.tool, 'get_canvas');
+  await api('result', { token: restored.ownerToken, body: { requestId: readRequest.requestId, result: { ok: true, board: { id: 'fictional' } } } });
+  assert.equal((await reading).structuredContent.board.id, 'fictional');
   for (const invalid of [
     null, [], 'all',
     { ...other, allPages: true }, { ...other, allPages: false, expectedSessionId: current.activeSessionId },
@@ -794,6 +815,7 @@ test('配对证明不可重放或跨操作替换，权限、期限与来源都�
     ...[undefined, false, true, 0, 900000.5, '900000', {}, []].map((durationMs) => ({ ...page, mode: 'read', durationMs, takeover: false })),
     { ...page, mode: 'admin', durationMs: 60000, takeover: false },
     { ...page, mode: 'write', durationMs: 60000 },
+    ...[false, null, 0, 1, 'true', {}, []].map(tabLock => ({ ...page, mode: 'read', durationMs: 60000, takeover: false, tabLock })),
     { ...page, mode: 'write', durationMs: 60000, takeover: false, extra: 'unexpected' }
   ]) assert.equal((await api('pairing/challenge', { body: { pairingId: paired.pairingId, action: 'authorize', parameters } })).status, 400);
   const malformed = await paired.proof('release', page);

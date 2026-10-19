@@ -51,6 +51,7 @@ test('复制标签的同 tabId 被排他锁识别，刷新原标签仍可保留�
   const first = await pairingPageIdentity(window(), webcrypto);
   assert.equal(first.tabId, tabId);
   assert.equal(first.reload, true);
+  assert.equal(first.holdsTabLock, true);
   const cloned = await pairingPageIdentity(window(), webcrypto);
   assert.notEqual(cloned.tabId, tabId);
   first.release();
@@ -70,6 +71,7 @@ test('不支持 Web Locks 时不以存储的 tabId 推定页面刷新', async ()
   }, webcrypto);
   assert.notEqual(identity.tabId, previous);
   assert.equal(identity.reload, false);
+  assert.equal(identity.holdsTabLock, false);
 });
 
 

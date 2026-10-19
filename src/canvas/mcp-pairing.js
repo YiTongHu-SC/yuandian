@@ -184,6 +184,7 @@ export async function pairingPageIdentity(window = globalThis.window, crypto = g
     stored = true;
   } catch { /* Explicit authorization still works without sessionStorage. */ }
   let release = () => {};
+  let holdsTabLock = false;
   const locks = window.navigator?.locks;
   if (locks?.request) {
     let locked = false;
@@ -198,7 +199,7 @@ export async function pairingPageIdentity(window = globalThis.window, crypto = g
         ready(Boolean(lock));
         if (lock) await held;
       }).catch(() => { failed = true; ready(false); });
-      if (await acquired) { locked = true; break; }
+      if (await acquired) { locked = true; holdsTabLock = true; break; }
       tabId = crypto.randomUUID();
       if (failed) break;
     }
@@ -212,6 +213,7 @@ export async function pairingPageIdentity(window = globalThis.window, crypto = g
   return {
     pageId: crypto.randomUUID(),
     tabId,
+    holdsTabLock,
     reload: stored && window.performance?.getEntriesByType('navigation')[0]?.type === 'reload',
     release
   };
