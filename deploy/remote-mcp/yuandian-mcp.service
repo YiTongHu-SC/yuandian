@@ -1,0 +1,43 @@
+[Unit]
+Description=Yuandian temporary single-canvas MCP relay
+After=network.target
+
+[Service]
+Type=simple
+User=yuandian-mcp
+Group=yuandian-mcp
+WorkingDirectory=/srv/yuandian/mcp/current
+ExecStart=/opt/yuandian-node/node-v24.22.0-linux-x64/bin/node /srv/yuandian/mcp/current/scripts/mcp-remote-server.mjs
+Environment=NODE_ENV=production
+Environment=YUANDIAN_PUBLIC_URL=https://stellarcore.games/yuandian-mcp
+Environment=YUANDIAN_ALLOWED_ORIGIN=https://yitonghu-sc.github.io
+Environment=YUANDIAN_PORT=4177
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=10s
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+MemoryMax=384M
+TasksMax=64
+LimitNOFILE=1024
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=yuandian-mcp
+
+[Install]
+WantedBy=multi-user.target

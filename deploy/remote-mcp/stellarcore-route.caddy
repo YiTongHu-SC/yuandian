@@ -1,0 +1,14 @@
+# Replace only the main-host try_files + file_server lines after saving the
+# complete current Caddyfile. Keep existing root and encode directives outside.
+# Within route, literal order ensures API paths reach the relay before fallback.
+# Validate the complete candidate; preserve all play routes and other host blocks.
+@yuandian_mcp path /yuandian-mcp/*
+log_skip @yuandian_mcp
+route {
+	route @yuandian_mcp {
+		uri strip_prefix /yuandian-mcp
+		reverse_proxy 127.0.0.1:4177
+	}
+	try_files {path} {path}/ /index.html
+	file_server
+}

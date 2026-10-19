@@ -17,6 +17,7 @@ import {
 import { createHistory, snapshotBoard } from './history.js';
 import { revisionOf, applyMcpEdits } from './mcp-model.js';
 import { createMcpPanel } from './mcp-ui.js';
+import { getMcpConnection } from './mcp-connection.js';
 import {
   clamp,
   coordinate as xy,
@@ -26,8 +27,7 @@ import {
 } from './geometry.js';
 
 const $ = (s) => document.querySelector(s);
-const localMcpAvailable =
-  location.protocol === 'http:' && location.hostname === '127.0.0.1';
+const mcpConnection = getMcpConnection(location);
 const copy = (x) => structuredClone(x);
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
@@ -433,7 +433,7 @@ function build() {
           })
         )
       ),
-      localMcpAvailable
+      mcpConnection.available
         ? button('AI 接入', toggleMcpPanel, 'ghost small', {
             id: 'ai-menu-toggle',
             title: 'MCP 配置与接入',
@@ -488,7 +488,7 @@ function build() {
   showRecovery();
 }
 function renderBoard() {
-  if (mcpPanel?.connected && mcpPanel.boardId !== board()?.id)
+  if (mcpPanel?.boardId && mcpPanel.boardId !== board()?.id)
     mcpPanel.disconnect('已切换画布，接入已断开');
   editing = null;
   nodeEls = new Map();
@@ -1483,7 +1483,7 @@ function showRecovery() {
   el.replaceChildren();
   if (!corrupt && !conflict) return;
   mcpPanel?.close();
-  if (mcpPanel?.connected)
+  if (mcpPanel?.boardId)
     void mcpPanel.disconnect('保存已暂停，AI 接入已断开。');
   el.append(
     h(
@@ -1648,6 +1648,7 @@ const freshCanvas =
 if (!workspace.boards.length) workspace = createWorkspace();
 build();
 mcpPanel = createMcpPanel({
+  connection: mcpConnection,
   getCanvas: board,
   readCanvas: readMcpCanvas,
   editCanvas: editMcpCanvas,

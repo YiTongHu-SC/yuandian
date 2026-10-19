@@ -11,6 +11,7 @@
     "start": "node scripts/dev-server.mjs",
     "build:pages": "node scripts/build-pages.mjs",
     "mcp": "node scripts/mcp-server.mjs",
+    "mcp:remote": "node scripts/mcp-remote-server.mjs",
     "test": "node scripts/test.mjs",
     "check": "node scripts/check.mjs",
     "verify": "npm run check && npm test"

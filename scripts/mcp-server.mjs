@@ -35,17 +35,20 @@ export function createCanvasMcpServer(settings) {
   async function relay(tool, arguments_) {
     let output;
     try {
-      const response = await fetch(settings.url, {
-        method: 'POST',
-        redirect: 'error',
-        signal: AbortSignal.timeout(18000),
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${settings.token}`
-        },
-        body: JSON.stringify({ tool, arguments: arguments_ })
-      });
-      output = await response.json();
+      if (settings.relay) output = await settings.relay(tool, arguments_);
+      else {
+        const response = await fetch(settings.url, {
+          method: 'POST',
+          redirect: 'error',
+          signal: AbortSignal.timeout(18000),
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${settings.token}`
+          },
+          body: JSON.stringify({ tool, arguments: arguments_ })
+        });
+        output = await response.json();
+      }
       if (
         !output ||
         typeof output !== 'object' ||

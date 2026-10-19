@@ -1,5 +1,4 @@
-const API = '/api/mcp';
-const POLL_DELAY = 750;
+import { codexMcpConfiguration, getMcpConnection } from './mcp-connection.js';
 
 function element(tag, attributes = {}, text = '') {
   const node = document.createElement(tag);
@@ -23,7 +22,8 @@ export function createMcpPanel({
   getCanvas,
   readCanvas,
   editCanvas,
-  canConnect
+  canConnect,
+  connection = getMcpConnection(window.location)
 }) {
   const root = element('aside', {
     id: 'mcp-panel',
@@ -56,7 +56,9 @@ export function createMcpPanel({
   const notice = element(
     'p',
     { class: 'mcp-notice' },
-    '仅授权此画布，切换画布会断开。AI 的修改可以撤销。'
+    connection.remote
+      ? '仅临时授权此画布，默认只读。内容经临时中继发送给 AI，持久数据仍在当前浏览器。AI 的修改可以撤销。'
+      : '仅授权此画布，切换画布会断开。AI 的修改可以撤销。'
   );
   const status = element('p', {
     class: 'mcp-status',
@@ -69,11 +71,17 @@ export function createMcpPanel({
   actions.append(connectButton, disconnectButton);
 
   const configuration = element('details', { class: 'mcp-configuration' });
-  const summary = element('summary', {}, 'AI 客户端配置');
+  const summary = element(
+    'summary',
+    {},
+    connection.remote ? 'Codex 配置' : 'AI 客户端配置'
+  );
   const configurationNote = element(
     'p',
     {},
-    '将配置添加到支持 MCP 的 AI 客户端。仅在本页保持打开时有效，断开后失效。'
+    connection.remote
+      ? '将此段添加或替换到 Codex 的 config.toml 中的 yuandian 服务，保留其他服务，再重新加载 MCP。配置最长有效 1 小时，需保持本页打开；切换、刷新或断开后失效。'
+      : '将配置添加到支持 MCP 的 AI 客户端。仅在本页保持打开时有效，断开后失效。'
   );
   const configText = element('textarea', {
     class: 'mcp-config-text',
@@ -109,9 +117,13 @@ export function createMcpPanel({
 
   let session = null;
   let starting = false;
+  let startingBoardId = null;
   let generation = 0;
   let pollTimer;
+  let expiryTimer;
   let failedPolls = 0;
+  const pageId = connection.remote ? crypto.randomUUID() : null;
+  const requests = new Set();
   const completedRequests = new Map();
   let message = '尚未开启接入';
   let isError = false;
@@ -145,6 +157,7 @@ export function createMcpPanel({
   }
 
   function allowed() {
+    if (!connection.available) return '当前页面未配置 AI 接入服务。';
     const result = canConnect();
     return result === true
       ? ''
@@ -161,43 +174,61 @@ export function createMcpPanel({
   }
 
   async function request(path, { ownerToken, body, keepalive = false } = {}) {
-    const response = await fetch(`${API}/${path}`, {
-      method: body === undefined ? 'GET' : 'POST',
-      cache: 'no-store',
-      headers: {
-        ...headers(ownerToken),
-        ...(body === undefined ? {} : { 'Content-Type': 'application/json' })
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      keepalive
-    });
-    if (response.status === 204) return null;
-    let data;
+    const controller = new AbortController();
+    requests.add(controller);
+    const timeout = setTimeout(
+      () => controller.abort(),
+      connection.requestTimeoutMs
+    );
     try {
-      data = await response.json();
-    } catch {
-      const error = new Error(
-        response.status === 404
-          ? '当前服务尚不支持 AI 接入，请重启原点项目服务后重试。'
-          : '服务未返回有效结果，请重试。'
-      );
-      error.status = response.status;
-      throw error;
+      const response = await fetch(`${connection.apiBase}/${path}`, {
+        method: body === undefined ? 'GET' : 'POST',
+        cache: 'no-store',
+        credentials: 'omit',
+        redirect: 'error',
+        mode: connection.remote ? 'cors' : 'same-origin',
+        referrerPolicy: 'no-referrer',
+        signal: controller.signal,
+        headers: {
+          ...headers(ownerToken),
+          ...(body === undefined ? {} : { 'Content-Type': 'application/json' })
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        keepalive
+      });
+      if (response.status === 204) return null;
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        const error = new Error(
+          response.status === 404
+            ? connection.remote
+              ? '远程接入服务暂不可用，请稍后重试。'
+              : '当前服务尚不支持 AI 接入，请重启原点项目服务后重试。'
+            : '服务未返回有效结果，请重试。'
+        );
+        error.status = response.status;
+        throw error;
+      }
+      if (!response.ok || data?.ok === false) {
+        const error = new Error(data?.error || '接入请求未完成，请重试。');
+        error.status = response.status;
+        error.code = data?.code;
+        throw error;
+      }
+      return data;
+    } finally {
+      clearTimeout(timeout);
+      requests.delete(controller);
     }
-    if (!response.ok || data?.ok === false) {
-      const error = new Error(data?.error || '接入请求未完成，请重试。');
-      error.status = response.status;
-      error.code = data?.code;
-      throw error;
-    }
-    return data;
   }
 
   async function revoke(ownerToken, keepalive = false) {
     try {
       await request('disconnect', { ownerToken, body: {}, keepalive });
     } catch {
-      // Losing the page heartbeat also expires the local bridge session.
+      // Losing the page heartbeat also expires the bridge session.
     }
   }
 
@@ -212,10 +243,15 @@ export function createMcpPanel({
     const boardId = current.id;
     const permission = mode.value;
     starting = true;
+    startingBoardId = boardId;
     feedback('正在开启接入…');
     try {
       const opened = await request('session', {
-        body: { boardId, mode: permission }
+        body: {
+          boardId,
+          mode: permission,
+          ...(connection.remote ? { pageId } : {})
+        }
       });
       if (ticket !== generation || getCanvas()?.id !== boardId || allowed()) {
         if (opened?.ownerToken) await revoke(opened.ownerToken);
@@ -227,24 +263,41 @@ export function createMcpPanel({
         !opened?.ownerToken ||
         !opened?.clientToken ||
         !opened?.config ||
+        opened.boardId !== boardId ||
+        opened.mode !== permission ||
+        (connection.remote && opened.pageId !== pageId) ||
         !Number.isFinite(opened.expiresAt) ||
         opened.expiresAt <= Date.now()
       ) {
         if (opened?.ownerToken) await revoke(opened.ownerToken);
         throw new Error('接入配置不完整，请重试。');
       }
+      let configurationText;
+      try {
+        if (
+          connection.remote &&
+          opened.config?.headers?.Authorization !== `Bearer ${opened.clientToken}`
+        )
+          throw new Error('远程接入配置无效，请重新开启接入。');
+        configurationText = connection.remote
+          ? codexMcpConfiguration(opened.config)
+          : JSON.stringify({ mcpServers: { yuandian: opened.config } }, null, 2);
+      } catch (error) {
+        await revoke(opened.ownerToken);
+        throw error;
+      }
       session = {
         ownerToken: opened.ownerToken,
         boardId,
         mode: permission,
-        expiresAt: opened.expiresAt
+        expiresAt: Math.min(opened.expiresAt, Date.now() + 3600000)
       };
-      configText.value = JSON.stringify(
-        { mcpServers: { yuandian: opened.config } },
-        null,
-        2
-      );
-      configuration.open = true;
+      configText.value = configurationText;
+      configuration.open = !connection.remote;
+      clearTimeout(expiryTimer);
+      expiryTimer = setTimeout(() => {
+        if (ticket === generation) void disconnect('接入已过期，请重新开启。');
+      }, session.expiresAt - Date.now());
       failedPolls = 0;
       const focusCanReturn =
         document.activeElement === connectButton ||
@@ -257,19 +310,24 @@ export function createMcpPanel({
       if (ticket === generation)
         feedback(
           error instanceof TypeError
-            ? '无法连接本机服务，请确认原点项目服务正在运行。'
-            : error.message || '无法开启接入，请检查项目服务。',
+            ? connection.remote
+              ? '无法连接远程接入服务，请检查网络后重试。'
+              : '无法连接本机服务，请确认原点项目服务正在运行。'
+            : error.name === 'AbortError'
+              ? '接入服务响应超时，请稍后重试。'
+              : error.message || '无法开启接入，请检查项目服务。',
           true
         );
     } finally {
       if (ticket === generation) {
         starting = false;
+        startingBoardId = null;
         update();
       }
     }
   }
 
-  function schedulePoll(ticket, delay = POLL_DELAY) {
+  function schedulePoll(ticket, delay = connection.pollDelayMs) {
     clearTimeout(pollTimer);
     if (session && ticket === generation) {
       pollTimer = setTimeout(() => poll(ticket), delay);
@@ -279,6 +337,10 @@ export function createMcpPanel({
   async function poll(ticket) {
     const active = session;
     if (!active || ticket !== generation) return;
+    if (Date.now() >= active.expiresAt) {
+      await disconnect('接入已过期，请重新开启。');
+      return;
+    }
     if (getCanvas()?.id !== active.boardId) {
       await disconnect('已切换画布，接入已断开。');
       return;
@@ -301,7 +363,16 @@ export function createMcpPanel({
         if (!result) {
           try {
             const refusal = allowed();
-            if (refusal)
+            if (
+              !Number.isFinite(pending.expiresAt) ||
+              Date.now() >= pending.expiresAt
+            )
+              result = {
+                ok: false,
+                code: 'REQUEST_EXPIRED',
+                error: '请求已过期，请重新读取画布。'
+              };
+            else if (refusal)
               result = { ok: false, code: 'UNAVAILABLE', error: refusal };
             else if (pending.tool === 'get_canvas') result = await readCanvas();
             else if (
@@ -339,6 +410,20 @@ export function createMcpPanel({
             };
           }
           if (ticket !== generation || session !== active) return;
+          if (getCanvas()?.id !== active.boardId) {
+            await disconnect('已切换画布，接入已断开。');
+            return;
+          }
+          if (Date.now() >= active.expiresAt) {
+            await disconnect('接入已过期，请重新开启。');
+            return;
+          }
+          if (Date.now() >= pending.expiresAt)
+            result = {
+              ok: false,
+              code: 'REQUEST_EXPIRED',
+              error: '请求已过期，请重新读取画布。'
+            };
           // Retry a lost acknowledgement with its original result. Never apply
           // the same edit again when the bridge repeats a pending request.
           completedRequests.set(pending.requestId, result);
@@ -346,12 +431,32 @@ export function createMcpPanel({
             completedRequests.delete(completedRequests.keys().next().value);
           }
         }
-        if (ticket !== generation || !session) return;
+        if (ticket !== generation || session !== active) return;
+        if (getCanvas()?.id !== active.boardId) {
+          await disconnect('已切换画布，接入已断开。');
+          return;
+        }
+        if (Date.now() >= active.expiresAt) {
+          await disconnect('接入已过期，请重新开启。');
+          return;
+        }
+        const refusal = allowed();
+        if (refusal) {
+          await disconnect(`${refusal}，接入已断开。`);
+          return;
+        }
+        if (!Number.isFinite(pending.expiresAt) || Date.now() >= pending.expiresAt)
+          result = {
+            ok: false,
+            code: 'REQUEST_EXPIRED',
+            error: '请求已过期，请重新读取画布。'
+          };
         await request('result', {
           ownerToken: active.ownerToken,
           body: { requestId: pending.requestId, result }
         });
       }
+      if (ticket !== generation || session !== active) return;
       failedPolls = 0;
       if (recovered)
         feedback(`接入已开启 · ${active.mode === 'write' ? '读写' : '只读'}`);
@@ -370,7 +475,7 @@ export function createMcpPanel({
       }
       feedback('接入暂时中断，正在重试…', true);
     }
-    schedulePoll(ticket);
+    schedulePoll(ticket, failedPolls ? 750 : connection.pollDelayMs);
   }
 
   async function disconnect(text = '接入已断开', { keepalive = false } = {}) {
@@ -378,8 +483,12 @@ export function createMcpPanel({
     const focusInside = root.contains(document.activeElement);
     generation += 1;
     clearTimeout(pollTimer);
+    clearTimeout(expiryTimer);
+    for (const controller of requests) controller.abort();
     session = null;
     starting = false;
+    startingBoardId = null;
+    mode.value = 'read';
     failedPolls = 0;
     completedRequests.clear();
     configText.value = '';
@@ -391,10 +500,14 @@ export function createMcpPanel({
 
   async function copyConfiguration() {
     if (!session || !configText.value) return;
+    const active = session;
     try {
       await navigator.clipboard.writeText(configText.value);
+      if (session !== active) return;
       feedback('配置已复制，请添加到你的 AI 客户端。');
     } catch {
+      if (session !== active) return;
+      configuration.open = true;
       configText.focus();
       configText.select();
       feedback('请复制已选中的配置。');
@@ -423,7 +536,7 @@ export function createMcpPanel({
     close,
     disconnect,
     get boardId() {
-      return session?.boardId;
+      return session?.boardId || startingBoardId;
     },
     get connected() {
       return Boolean(session);
