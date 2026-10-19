@@ -11,9 +11,11 @@
 1. 在线打开原点，结束正在进行的编辑，点“AI 接入”，建立一次配对。首次使用复制固定 TOML，按下文配置 Codex 并首次加载 `yuandian`；已有当前线上配置时，可在配对选项中粘贴，复用原客户端凭据。粘贴内容只接受本服务的固定地址及凭据，不写其他客户端配置。
 2. 确认授权范围为当前浏览器、当前站点的全部画布。默认“只读”，允许列举、读取和导出；确需 Codex 编辑或新建时明确选择“读写”。授权期限默认一小时，也可选择十五分钟或一分钟。
 3. 在网页授权，保持这张页面打开。先调用 `connection_status` 和 `list_canvases`；读取后用明确的 `boardId` 和刚读取的 `revision` 编辑。切换画布继续有效。
-4. 刷新、关闭后重开、到期、主动断开或中继重启时，Codex 配对继续保留，工具报告 `needs_authorization`。在网页重新授权后继续使用，无需更换配置或重新连接 Codex，每次重新授权均恢复默认只读。
+4. 刷新、关闭后重开、到期、主动断开或中继重启时，Codex 配对继续保留，状态为未授权（`needs_authorization` 或到期时的 `expired`），内容工具返回 `needs_authorization`。在网页重新授权后继续使用，无需更换配置或重新连接 Codex，每次重新授权均恢复默认只读。
 
 打开面板、记住配对或服务启动本身不会授权或上传画布。配对不是永久画布访问。另一标签页不能静默接管；需明确选择改由当前页授权，原页与其在途请求随即失效。主动取消配对后，固定客户端凭据也会失效；清理浏览器设备密钥或更换浏览器后须重新配对，JSON 备份不迁移配对关系。
+
+跨页接管与取消配对需要浏览器支持 Web Locks，操作会先通知旧页撤销授权，并等待已开始的页面操作离开授权锁。缺少该能力时面板明确拒绝这两项操作，可先在原页断开后在另一页重新授权；取消配对需使用支持该能力的浏览器。页面从往返缓存恢复时重建身份，不自动恢复授权。
 
 面板仅在指定 Pages 来源 `https://yitonghu-sc.github.io` 的 `/yuandian/` 路径启用固定中继。查询参数、导入内容及其他静态镜像不能指定另一台接收内容或凭据的服务器。中继跨源接口只允许该精确 Origin；Origin 不含 `/yuandian/`，也不能代替令牌鉴权。
 
@@ -114,7 +116,7 @@ YUANDIAN_MCP_TOKEN = "<面板中本次接入的临时令牌>"
 
 | 工具 | 参数 | 结果与权限 |
 | --- | --- | --- |
-| `connection_status` | `{}` | 有授权时返回连接状态、`scope`、权限、会话到期时间与最近心跳；线上有效配对未授权时为 `ok: true, connected: false, state: needs_authorization`；旧单画布范围另含 `boardId`，不读取正文 |
+| `connection_status` | `{}` | 有授权时返回连接状态、`scope`、权限、会话到期时间与最近心跳；线上有效配对未授权时为 `ok: true, connected: false`，`state` 为 `needs_authorization` 或到期时的 `expired`；旧单画布范围另含 `boardId`，不读取正文 |
 | `list_canvases` | `{}` | 工作区范围；返回 `{ ok, activeId, workspaceRevision, boards }`，每项含 `id`、`title`、`nodeCount`、`edgeCount` 和 `revision`，不返回卡片正文 |
 | `get_canvas` | `{ boardId? }` | 返回 `{ ok, board, revision }`；省略 ID 时读取授权页面当前画布 |
 | `edit_canvas` | `{ boardId, expectedRevision, operations }` | 读写权限，工作区授权须明确目标 ID；成功返回 `{ ok, boardId, revision, created }`，失败不作部分修改，不切换用户当前画布 |
