@@ -2,6 +2,8 @@
 
 更新日期：2026-10-19，Asia/Shanghai。
 
+2026-10-19 卡片方向键、同级新增与 Esc 保存已随提交 `84e69e3` 发布；本轮 Actions、资源一致性和真实线上操作记录见 [卡片快捷键验证](keyboard-validation.md#线上发布与验收)。
+
 源码仓库：[YiTongHu-SC/yuandian](https://github.com/YiTongHu-SC/yuandian)。在线地址：[原点](https://yitonghu-sc.github.io/yuandian/)。发布由用户明确要求，源码和提交历史公开；个人画布、备份、日志及客户端配置不属于发布内容。
 
 ## 发布方式
