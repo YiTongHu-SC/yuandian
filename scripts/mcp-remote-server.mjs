@@ -1,8 +1,7 @@
 import http from 'node:http';
+import { realpathSync } from 'node:fs';
 import { isIP } from 'node:net';
-import path from 'node:path';
 import { Readable } from 'node:stream';
-import { pathToFileURL } from 'node:url';
 import { createRemoteMcpBridge, remoteSettings } from './mcp-remote-bridge.mjs';
 
 function incomingBody(incoming) {
@@ -34,10 +33,33 @@ function incomingBody(incoming) {
   });
 }
 
+async function drainRejectedBody(incoming, deadline) {
+  if (incoming.complete || incoming.destroyed) return;
+  await new Promise((resolve) => {
+    const finish = () => {
+      clearTimeout(timer);
+      incoming.off('end', finish);
+      incoming.off('close', finish);
+      incoming.off('error', finish);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      incoming.destroy();
+      finish();
+    }, Math.max(1, deadline - Date.now()));
+    timer.unref();
+    incoming.once('end', finish);
+    incoming.once('close', finish);
+    incoming.once('error', finish);
+    incoming.resume();
+  });
+}
+
 /** The only listener is loopback; a reverse proxy supplies HTTPS and strips its prefix. */
 export async function startRemoteMcpServer({ port = 4177, ...settings } = {}) {
   const bridge = createRemoteMcpBridge(settings);
   const server = http.createServer({ maxHeaderSize: 16384 }, async (incoming, outgoing) => {
+    const bodyDeadline = Date.now() + 15000;
     const abort = new AbortController();
     incoming.once('aborted', () => abort.abort());
     outgoing.once('close', () => { if (!outgoing.writableEnded) abort.abort(); });
@@ -55,6 +77,10 @@ export async function startRemoteMcpServer({ port = 4177, ...settings } = {}) {
         clientAddress: forwarded && isIP(forwarded) ? forwarded : incoming.socket.remoteAddress
       });
       if (request.body && !request.bodyUsed) await request.body.cancel();
+      // With Connection: close, ending a 413 before its rejected upload has
+      // drained can reset the TCP connection and hide the HTTP response. Read
+      // and discard the remainder within the existing 15-second body deadline.
+      if (response.status === 413) await drainRejectedBody(incoming, bodyDeadline);
       if (outgoing.destroyed || outgoing.writableEnded) return;
       outgoing.writeHead(response.status, Object.fromEntries(response.headers));
       if (!response.body) outgoing.end();
@@ -88,7 +114,18 @@ export async function startRemoteMcpServer({ port = 4177, ...settings } = {}) {
   return server;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+function isMainModule() {
+  if (!process.argv[1]) return false;
+  try {
+    // Production switches a `current` directory symlink between releases. Node
+    // resolves import.meta.url to the release while argv retains that symlink.
+    return realpathSync(process.argv[1]) === realpathSync(new URL(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) {
   try {
     const server = await startRemoteMcpServer(remoteSettings());
     console.log(`Yuandian MCP listening on 127.0.0.1:${server.address().port}`);

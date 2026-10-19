@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { mkdtemp, rm, symlink } from 'node:fs/promises';
 import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { createRemoteMcpBridge, remoteSettings } from '../../scripts/mcp-remote-bridge.mjs';
 import { startRemoteMcpServer } from '../../scripts/mcp-remote-server.mjs';
@@ -10,6 +15,66 @@ const publicUrl = 'https://relay.example/yuandian-mcp';
 const allowedOrigin = 'https://yitonghu-sc.github.io';
 const hostname = 'relay.example';
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test('CLI 从 current 目录符号链接或 junction 启动后实际监听并通过健康检查', { timeout: 15000 }, async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), 'yuandian-remote-cli-'));
+  assert.equal(path.dirname(temporary), path.resolve(os.tmpdir()));
+  assert.ok(path.basename(temporary).startsWith('yuandian-remote-cli-'));
+  const project = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+  const current = path.join(temporary, 'current');
+  let child;
+  let exited;
+  t.after(async () => {
+    if (child && child.exitCode === null && child.signalCode === null) child.kill();
+    if (exited) await exited;
+    // This exact mkdtemp path is checked above; rm removes the link itself.
+    await rm(temporary, { recursive: true, force: true });
+  });
+  try { await symlink(project, current, process.platform === 'win32' ? 'junction' : 'dir'); }
+  catch (error) {
+    if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) {
+      t.skip('当前环境不能创建目录链接。');
+      return;
+    }
+    throw error;
+  }
+  const reservation = http.createServer();
+  await new Promise((resolve) => reservation.listen(0, '127.0.0.1', resolve));
+  const port = reservation.address().port;
+  await new Promise((resolve) => reservation.close(resolve));
+  child = spawn(process.execPath, [path.join(current, 'scripts/mcp-remote-server.mjs')], {
+    cwd: current,
+    env: { ...process.env, YUANDIAN_PUBLIC_URL: publicUrl, YUANDIAN_ALLOWED_ORIGIN: allowedOrigin, YUANDIAN_PORT: String(port) },
+    stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true
+  });
+  let output = '';
+  child.stdout.on('data', (chunk) => { output += chunk.toString(); });
+  child.stderr.on('data', (chunk) => { output += chunk.toString(); });
+  let startupError;
+  child.once('error', (error) => { startupError = error; });
+  exited = new Promise((resolve) => child.once('close', resolve));
+  async function health() {
+    return await new Promise((resolve, reject) => {
+      const request = http.get({ host: '127.0.0.1', port, path: '/health', agent: false, headers: { Host: hostname }, timeout: 200 }, (response) => {
+        const chunks = [];
+        response.on('data', (chunk) => chunks.push(chunk));
+        response.on('end', () => resolve({ status: response.statusCode, value: JSON.parse(Buffer.concat(chunks).toString('utf8')) }));
+      });
+      request.on('error', reject);
+      request.on('timeout', () => request.destroy(new Error('Health probe timed out')));
+    });
+  }
+  let ready;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (startupError) throw startupError;
+    assert.equal(child.exitCode, null, `CLI 提前退出：${output}`);
+    try { ready = await health(); break; } catch {}
+    await pause(50);
+  }
+  assert.equal(ready?.status, 200, `CLI 未启动监听：${output}`);
+  assert.deepEqual(ready.value, { ok: true, service: 'yuandian-mcp', version: '0.1.0' });
+  assert.match(output, new RegExp(`127\\.0\\.0\\.1:${port}`, 'u'));
+});
 
 async function fixture(t, options = {}) {
   const server = await startRemoteMcpServer({ publicUrl, allowedOrigin, port: 0, pollTimeoutMs: 40, ...options });
@@ -275,15 +340,43 @@ test('旧版 initialize / tools/list 可通过官方 stateless fallback 接入�
 
 test('匿名创建频率、会话上限、请求大小、JSON 与内容类型限制', async (t) => {
   const { api, authorize } = await fixture(t, { maxSessions: 1 });
+  async function expectStatus(label, route, options, status) {
+    let response;
+    try { response = await api(route, options); }
+    catch (error) { throw new Error(`${label} 未收到完整 HTTP 响应`, { cause: error }); }
+    assert.equal(response.status, status, label);
+  }
   const session = await authorize();
   assert.equal((await api('session', { body: { boardId: 'other', pageId: randomUUID() } })).value.code, 'session_limit');
-  assert.equal((await api('session', { rawBody: 'x'.repeat(8193) })).status, 413);
+  await expectStatus('session 正文超过 8 KB', 'session', { rawBody: 'x'.repeat(8193) }, 413);
   assert.equal((await api('session', { rawBody: '{bad' })).status, 400);
   assert.equal((await api('session', { body: {}, headers: { 'Content-Type': 'text/plain' } })).status, 415);
-  assert.equal((await api('/mcp', { token: session.clientToken, browser: false, rawBody: 'x'.repeat(1024 * 1024 + 1) })).status, 413);
-  assert.equal((await api('/mcp', { token: session.clientToken, browser: false, headers: { 'Transfer-Encoding': 'chunked' }, rawBody: 'x'.repeat(1024 * 1024 + 1) })).status, 413);
+  await expectStatus('MCP Content-Length 正文超过 1 MB', '/mcp', { token: session.clientToken, browser: false, rawBody: 'x'.repeat(1024 * 1024 + 1) }, 413);
+  await expectStatus('MCP chunked 正文超过 1 MB', '/mcp', { token: session.clientToken, browser: false, headers: { 'Transfer-Encoding': 'chunked' }, rawBody: 'x'.repeat(1024 * 1024 + 1) }, 413);
   for (let i = 0; i < 4; i++) await api('session', { body: {} });
   assert.equal((await api('session', { body: {} })).status, 429);
+});
+
+test('并发超限上传均收到完整 413，包括 Content-Length 早拒和 chunked 流式拒绝', async (t) => {
+  const { api, authorize } = await fixture(t);
+  const session = await authorize();
+  await Promise.all(Array.from({ length: 16 }, async (_, index) => {
+    const chunked = index % 2 === 1;
+    const label = `并发 ${index + 1} · ${chunked ? 'chunked' : 'Content-Length'}`;
+    let response;
+    try {
+      response = await api('/mcp', {
+        token: session.clientToken, browser: false,
+        ...(chunked ? { headers: { 'Transfer-Encoding': 'chunked' } } : {}),
+        rawBody: 'x'.repeat(1024 * 1024 + 1)
+      });
+    } catch (error) {
+      throw new Error(`${label} 未收到完整 HTTP 响应`, { cause: error });
+    }
+    assert.equal(response.status, 413, label);
+    assert.equal(response.value.code, 'invalid_request', label);
+    assert.match(response.value.error, /过大/u, label);
+  }));
 });
 
 test('已交付的 HTTP 请求取消后不重投；迟到回执提示重读画布', async (t) => {
