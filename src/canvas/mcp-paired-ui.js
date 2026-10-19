@@ -45,7 +45,7 @@ export function createPairedMcpPanel({
   mode.append(element('option', { value: 'read' }, '只读'), element('option', { value: 'write' }, '读写'));
   permission.append(mode);
   const notice = element('p', { class: 'mcp-notice' },
-    '默认只读，最长 1 小时。刷新、关闭或到期后停止访问，重新授权无需修改 Codex 配置。画布仍保存在浏览器；授权内容经中继发送给 AI，修改可撤销。');
+    '默认只读。可选 15 分钟、1 小时或永久（直到断开）；刷新、关闭、失联或服务重启仍会断开。重新授权无需修改 Codex 配置。画布仍保存在浏览器；授权内容经中继发送给 AI，修改可撤销。');
   const status = element('p', { class: 'mcp-status', role: 'status', 'aria-live': 'polite' });
   const actions = element('div', { class: 'mcp-actions' });
   const authorizeButton = action('配对并授权', () => authorize(), 'primary');
@@ -58,10 +58,11 @@ export function createPairedMcpPanel({
   const durationLabel = element('label', { class: 'mcp-permission' }, '本次授权');
   const duration = element('select', { id: 'mcp-duration', 'aria-label': '本次授权时长' });
   duration.append(
-    element('option', { value: '3600000' }, '1 小时'),
     element('option', { value: '900000' }, '15 分钟'),
-    element('option', { value: '60000' }, '1 分钟')
+    element('option', { value: '3600000' }, '1 小时'),
+    element('option', { value: 'null' }, '永久（直到断开）')
   );
+  duration.value = '3600000';
   durationLabel.append(duration);
   const existing = element('details', { class: 'mcp-existing' });
   existing.append(element('summary', {}, '沿用已有 Codex 配置'));
@@ -281,8 +282,8 @@ export function createPairedMcpPanel({
       return feedback('当前浏览器不支持安全跨页接管，请先在原页面断开授权后重试。', true);
     const ticket = ++generation;
     const permission = mode.value;
-    const durationMs = Number(duration.value);
-    if (!['read', 'write'].includes(permission) || ![60000, 900000, 3600000].includes(durationMs))
+    const durationMs = duration.value === 'null' ? null : Number(duration.value);
+    if (!['read', 'write'].includes(permission) || ![null, 900000, 3600000].includes(durationMs))
       return feedback('请选择有效的权限和授权时长。', true);
     busy = true;
     feedback(pairing?.pairingId ? '正在重新授权…' : '正在配对…');
@@ -324,8 +325,9 @@ export function createPairedMcpPanel({
       }
       if (!/^[a-f0-9]{64}$/u.test(opened?.ownerToken || '') || opened.scope !== 'workspace' ||
           opened.pageId !== identity.pageId || opened.mode !== permission ||
-          !Number.isFinite(opened.expiresAt) || opened.expiresAt <= Date.now() ||
-          opened.expiresAt > Date.now() + durationMs + 1000) {
+          (durationMs === null ? opened.expiresAt !== null :
+            !Number.isFinite(opened.expiresAt) || opened.expiresAt <= Date.now() ||
+            opened.expiresAt > Date.now() + durationMs + 1000)) {
         if (opened?.ownerToken) await revoke(opened.ownerToken);
         throw new Error('授权结果无效，请重试。');
       }
@@ -334,10 +336,14 @@ export function createPairedMcpPanel({
       pageInUse = false;
       failedPolls = 0;
       clearTimeout(expiryTimer);
-      expiryTimer = setTimeout(() => {
-        if (ticket === generation) void disconnect('授权已到期 · 配对保留，点击重新授权即可恢复。');
-      }, session.expiresAt - Date.now());
-      feedback(`已授权 · ${permission === 'write' ? '读写' : '只读'} · ${new Date(session.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} 到期`);
+      if (session.expiresAt !== null) {
+        expiryTimer = setTimeout(() => {
+          if (ticket === generation) void disconnect('授权已到期 · 配对保留，点击重新授权即可恢复。');
+        }, session.expiresAt - Date.now());
+      }
+      feedback(`已授权 · ${permission === 'write' ? '读写' : '只读'} · ${session.expiresAt === null
+        ? '永久（直到断开）'
+        : `${new Date(session.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} 到期`}`);
       schedulePoll(ticket, 0);
     } catch (error) {
       if (ticket === generation) {
@@ -358,7 +364,7 @@ export function createPairedMcpPanel({
   async function poll(ticket) {
     const active = session;
     if (!active || ticket !== generation) return;
-    if (Date.now() >= active.expiresAt) return disconnect('授权已到期 · 点击重新授权即可恢复。');
+    if (active.expiresAt !== null && Date.now() >= active.expiresAt) return disconnect('授权已到期 · 点击重新授权即可恢复。');
     const reason = allowed();
     if (reason) return disconnect(`${reason}，授权已断开。`);
     try {
@@ -381,7 +387,7 @@ export function createPairedMcpPanel({
               const context = {
                 isAuthorized: () => ticket === generation && session === active &&
                   active.pageId === identity.pageId && (!writes || active.mode === 'write') &&
-                  Date.now() < active.expiresAt && Number.isFinite(pending.expiresAt) &&
+                  (active.expiresAt === null || Date.now() < active.expiresAt) && Number.isFinite(pending.expiresAt) &&
                   Date.now() < pending.expiresAt
               };
               result = await withGrantLock(() => context.isAuthorized()
@@ -393,14 +399,14 @@ export function createPairedMcpPanel({
             result = { ok: false, code: 'CANVAS_ERROR', error: '画布操作未完成，请重新读取后重试。' };
           }
           if (ticket !== generation || session !== active) return;
-          if (Date.now() >= active.expiresAt) return disconnect('授权已到期 · 点击重新授权即可恢复。');
+          if (active.expiresAt !== null && Date.now() >= active.expiresAt) return disconnect('授权已到期 · 点击重新授权即可恢复。');
           if (Date.now() >= pending.expiresAt)
             result = { ok: false, code: 'REQUEST_EXPIRED', error: '请求已过期，请重新读取画布。' };
           completedRequests.set(pending.requestId, result);
           if (completedRequests.size > 32) completedRequests.delete(completedRequests.keys().next().value);
         }
         if (ticket !== generation || session !== active) return;
-        if (Date.now() >= active.expiresAt) return disconnect('授权已到期 · 点击重新授权即可恢复。');
+        if (active.expiresAt !== null && Date.now() >= active.expiresAt) return disconnect('授权已到期 · 点击重新授权即可恢复。');
         const refusal = allowed();
         if (refusal) return disconnect(`${refusal}，授权已断开。`);
         if (!Number.isFinite(pending.expiresAt) || Date.now() >= pending.expiresAt)
@@ -409,7 +415,7 @@ export function createPairedMcpPanel({
       }
       if (ticket !== generation || session !== active) return;
       failedPolls = 0;
-      if (recovered) feedback(`已恢复连接 · ${active.mode === 'write' ? '读写' : '只读'} · 本次到期时间不变`);
+      if (recovered) feedback(`已恢复连接 · ${active.mode === 'write' ? '读写' : '只读'} · ${active.expiresAt === null ? '永久（直到断开）' : '本次到期时间不变'}`);
     } catch (error) {
       if (ticket !== generation || session !== active) return;
       failedPolls += 1;

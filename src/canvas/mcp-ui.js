@@ -63,6 +63,15 @@ function createLegacyMcpPanel({
     element('option', { value: 'write' }, '读写')
   );
   modeLabel.append(mode);
+  const durationLabel = element('label', { class: 'mcp-permission' }, '本次授权');
+  const duration = element('select', { id: 'mcp-duration', 'aria-label': '本次授权时长' });
+  duration.append(
+    element('option', { value: '900000' }, '15 分钟'),
+    element('option', { value: '3600000' }, '1 小时'),
+    element('option', { value: 'null' }, '永久（直到断开）')
+  );
+  duration.value = '3600000';
+  durationLabel.append(duration);
   const notice = element(
     'p',
     { class: 'mcp-notice' },
@@ -90,8 +99,8 @@ function createLegacyMcpPanel({
     'p',
     {},
     connection.remote
-      ? '将此段添加或替换到 Codex 的 config.toml 中的 yuandian 服务，保留其他服务，再重新加载 MCP。配置最长有效 1 小时，需保持本页打开；刷新、关闭或断开后失效。'
-      : '将配置添加到支持 MCP 的 AI 客户端。配置最长有效 1 小时，需保持本页打开；刷新、关闭或断开后失效。'
+      ? '将此段添加或替换到 Codex 的 config.toml 中的 yuandian 服务，保留其他服务，再重新加载 MCP。配置按所选时长有效，需保持本页打开；刷新、关闭、断开、失联或服务重启后失效。'
+      : '将配置添加到支持 MCP 的 AI 客户端。配置按所选时长有效，需保持本页打开；刷新、关闭、断开、失联或服务重启后失效。'
   );
   const configText = element('textarea', {
     class: 'mcp-config-text',
@@ -118,6 +127,7 @@ function createLegacyMcpPanel({
     description,
     scope,
     modeLabel,
+    durationLabel,
     notice,
     status,
     actions,
@@ -147,6 +157,7 @@ function createLegacyMcpPanel({
   function update() {
     scope.textContent = '授权范围：当前浏览器、当前站点的全部画布';
     mode.disabled = starting || Boolean(session);
+    duration.disabled = starting || Boolean(session);
     connectButton.disabled = starting;
     connectButton.hidden = Boolean(session);
     connectButton.textContent = starting ? '正在开启…' : '开启接入';
@@ -254,6 +265,9 @@ function createLegacyMcpPanel({
     const focusStartedOnConnect = document.activeElement === connectButton;
     const ticket = ++generation;
     const permission = mode.value;
+    const durationMs = duration.value === 'null' ? null : Number(duration.value);
+    if (!['read', 'write'].includes(permission) || ![null, 900000, 3600000].includes(durationMs))
+      return feedback('请选择有效的权限和授权时长。', true);
     starting = true;
     feedback('正在开启接入…');
     try {
@@ -261,7 +275,8 @@ function createLegacyMcpPanel({
         body: {
           scope: 'workspace',
           pageId,
-          mode: permission
+          mode: permission,
+          durationMs
         }
       });
       if (ticket !== generation || allowed()) {
@@ -277,8 +292,9 @@ function createLegacyMcpPanel({
         opened.scope !== 'workspace' ||
         opened.mode !== permission ||
         opened.pageId !== pageId ||
-        !Number.isFinite(opened.expiresAt) ||
-        opened.expiresAt <= Date.now()
+        (durationMs === null ? opened.expiresAt !== null :
+          !Number.isFinite(opened.expiresAt) || opened.expiresAt <= Date.now() ||
+          opened.expiresAt > Date.now() + durationMs + 1000)
       ) {
         if (opened?.ownerToken) await revoke(opened.ownerToken);
         throw new Error('接入配置不完整，请重试。');
@@ -302,19 +318,21 @@ function createLegacyMcpPanel({
         scope: 'workspace',
         pageId,
         mode: permission,
-        expiresAt: Math.min(opened.expiresAt, Date.now() + 3600000)
+        expiresAt: opened.expiresAt
       };
       configText.value = configurationText;
       configuration.open = !connection.remote;
       clearTimeout(expiryTimer);
-      expiryTimer = setTimeout(() => {
-        if (ticket === generation) void disconnect('接入已过期，请重新开启。');
-      }, session.expiresAt - Date.now());
+      if (session.expiresAt !== null) {
+        expiryTimer = setTimeout(() => {
+          if (ticket === generation) void disconnect('接入已过期，请重新开启。');
+        }, session.expiresAt - Date.now());
+      }
       failedPolls = 0;
       const focusCanReturn =
         document.activeElement === connectButton ||
         document.activeElement === document.body;
-      feedback(`接入已开启 · ${permission === 'write' ? '读写' : '只读'}`);
+      feedback(`接入已开启 · ${permission === 'write' ? '读写' : '只读'}${session.expiresAt === null ? ' · 永久（直到断开）' : ''}`);
       if (focusStartedOnConnect && focusCanReturn && !root.hidden)
         disconnectButton.focus();
       schedulePoll(ticket, 0);
@@ -348,7 +366,7 @@ function createLegacyMcpPanel({
   async function poll(ticket) {
     const active = session;
     if (!active || ticket !== generation) return;
-    if (Date.now() >= active.expiresAt) {
+    if (active.expiresAt !== null && Date.now() >= active.expiresAt) {
       await disconnect('接入已过期，请重新开启。');
       return;
     }
@@ -396,7 +414,7 @@ function createLegacyMcpPanel({
                   active.scope === 'workspace' &&
                   active.pageId === pageId &&
                   (!writes || active.mode === 'write') &&
-                  Date.now() < active.expiresAt &&
+                  (active.expiresAt === null || Date.now() < active.expiresAt) &&
                   Number.isFinite(pending.expiresAt) &&
                   Date.now() < pending.expiresAt
               });
@@ -415,7 +433,7 @@ function createLegacyMcpPanel({
             };
           }
           if (ticket !== generation || session !== active) return;
-          if (Date.now() >= active.expiresAt) {
+          if (active.expiresAt !== null && Date.now() >= active.expiresAt) {
             await disconnect('接入已过期，请重新开启。');
             return;
           }
@@ -433,7 +451,7 @@ function createLegacyMcpPanel({
           }
         }
         if (ticket !== generation || session !== active) return;
-        if (Date.now() >= active.expiresAt) {
+        if (active.expiresAt !== null && Date.now() >= active.expiresAt) {
           await disconnect('接入已过期，请重新开启。');
           return;
         }
@@ -456,7 +474,7 @@ function createLegacyMcpPanel({
       if (ticket !== generation || session !== active) return;
       failedPolls = 0;
       if (recovered)
-        feedback(`接入已开启 · ${active.mode === 'write' ? '读写' : '只读'}`);
+        feedback(`接入已开启 · ${active.mode === 'write' ? '读写' : '只读'}${active.expiresAt === null ? ' · 永久（直到断开）' : ''}`);
       else update();
     } catch (error) {
       if (ticket !== generation || !session) return;

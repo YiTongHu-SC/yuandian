@@ -7,16 +7,22 @@ const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{1
 const revision = /^[a-f0-9]{64}$/u;
 const denied = (status, code, error) => ({ status, value: { ok: false, code, error } });
 
+// null disables only the absolute grant expiry; heartbeat and request deadlines still apply.
+export const validMcpDuration = (value) => value === null ||
+  (Number.isSafeInteger(value) && value >= 60000 && value <= 3600000);
+
 export function inspectMcpGrant(input, { requireLegacyPageId = false } = {}) {
-  if (!object(input) || (input.mode !== undefined && !['read', 'write'].includes(input.mode))) return null;
+  if (!object(input) || (input.mode !== undefined && !['read', 'write'].includes(input.mode)) ||
+      (own(input, 'durationMs') && !validMcpDuration(input.durationMs))) return null;
+  const duration = own(input, 'durationMs') ? { durationMs: input.durationMs } : {};
   if (input.scope === 'workspace') {
-    if (!exactKeys(input, ['scope', 'pageId', 'mode']) || !uuid.test(input.pageId || '')) return null;
-    return { scope: 'workspace', pageId: input.pageId, mode: input.mode || 'read' };
+    if (!exactKeys(input, ['scope', 'pageId', 'mode', 'durationMs']) || !uuid.test(input.pageId || '')) return null;
+    return { scope: 'workspace', pageId: input.pageId, mode: input.mode || 'read', ...duration };
   }
   // An older client without an explicit scope always retains its original single-canvas grant.
-  if (own(input, 'scope') || !exactKeys(input, ['boardId', 'pageId', 'mode']) || !validId(input.boardId) ||
+  if (own(input, 'scope') || !exactKeys(input, ['boardId', 'pageId', 'mode', 'durationMs']) || !validId(input.boardId) ||
       ((requireLegacyPageId || own(input, 'pageId')) && !uuid.test(input.pageId || ''))) return null;
-  return { scope: 'canvas', boardId: input.boardId, ...(input.pageId ? { pageId: input.pageId } : {}), mode: input.mode || 'read' };
+  return { scope: 'canvas', boardId: input.boardId, ...(input.pageId ? { pageId: input.pageId } : {}), mode: input.mode || 'read', ...duration };
 }
 
 /** Check permission and target routing before anything is queued for the browser. */

@@ -82,7 +82,7 @@ export function createMcpBridge({
   function sweep() {
     for (const session of sessions) {
       if (
-        now() >= session.expiresAt ||
+        (session.expiresAt !== null && now() >= session.expiresAt) ||
         now() - session.heartbeat > heartbeatMs
       ) {
         revoke(
@@ -157,7 +157,7 @@ export function createMcpBridge({
           ...grant,
           ownerToken: randomBytes(32).toString('hex'),
           clientToken: randomBytes(32).toString('hex'),
-          expiresAt: now() + sessionTtlMs,
+          expiresAt: grant.durationMs === null ? null : now() + Math.min(grant.durationMs ?? sessionTtlMs, sessionTtlMs),
           heartbeat: now(),
           pending: new Map()
         };
@@ -206,7 +206,7 @@ export function createMcpBridge({
           // Waiting for a browser lock cannot outlive this delivered authorization.
           expiresAt: Math.min(
             item.expiresAt,
-            session.expiresAt,
+            session.expiresAt ?? Infinity,
             session.heartbeat + heartbeatMs
           )
         });

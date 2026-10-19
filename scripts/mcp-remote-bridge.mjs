@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { createMcpHandler } from '@modelcontextprotocol/server';
 import { createCanvasMcpServer } from './mcp-server.mjs';
-import { inspectMcpCall, inspectMcpGrant, inspectMcpResult } from './mcp-access.mjs';
+import { inspectMcpCall, inspectMcpGrant, inspectMcpResult, validMcpDuration } from './mcp-access.mjs';
 import { createMemoryPairingAuthority } from './mcp-pairing-store.mjs';
 
 const HOUR = 60 * 60 * 1000;
@@ -104,7 +104,7 @@ export function createRemoteMcpBridge({
   for (const value of [requestTimeoutMs, pollTimeoutMs, heartbeatMs, sessionTtlMs, maxSessions, maxPending])
     if (!Number.isFinite(value) || value <= 0) throw new Error('MCP 限额必须为正数。');
   if (sessionTtlMs > HOUR || pollTimeoutMs >= heartbeatMs)
-    throw new Error('授权最多一小时，心跳期限必须长于长轮询。');
+    throw new Error('有限授权的默认期限最多一小时，心跳期限必须长于长轮询。');
   const publicAddress = new URL(publicUrl);
   const owners = new Map();
   const clients = new Map();
@@ -173,7 +173,7 @@ export function createRemoteMcpBridge({
 
   function sweep() {
     for (const session of sessions) {
-      if (now() >= session.expiresAt || now() - session.heartbeat > heartbeatMs)
+      if ((session.expiresAt !== null && now() >= session.expiresAt) || now() - session.heartbeat > heartbeatMs)
         revoke(session, failure('session_expired', '画布连接已过期，请保持页面打开并重新授权。'));
       else for (const [id, ack] of session.acknowledged)
         if (ack.until <= now()) session.acknowledged.delete(id);
@@ -199,7 +199,7 @@ export function createRemoteMcpBridge({
       requestId: item.requestId,
       tool: item.tool,
       arguments: item.arguments,
-      expiresAt: Math.min(item.expiresAt, session.expiresAt, session.heartbeat + heartbeatMs)
+      expiresAt: Math.min(item.expiresAt, session.expiresAt ?? Infinity, session.heartbeat + heartbeatMs)
     });
   }
 
@@ -297,8 +297,8 @@ export function createRemoteMcpBridge({
     if (action === 'attach') return exactKeys(parameters, ['pageId', 'tabId', 'reload', 'takeover']) && page() &&
       typeof parameters.reload === 'boolean' && typeof parameters.takeover === 'boolean';
     if (action === 'authorize') return exactKeys(parameters, ['pageId', 'tabId', 'mode', 'durationMs', 'takeover']) && page() &&
-      ['read', 'write'].includes(parameters.mode) && Number.isSafeInteger(parameters.durationMs) &&
-      parameters.durationMs >= 60000 && parameters.durationMs <= HOUR && typeof parameters.takeover === 'boolean';
+      ['read', 'write'].includes(parameters.mode) && validMcpDuration(parameters.durationMs) &&
+      typeof parameters.takeover === 'boolean';
     return false;
   }
 
@@ -369,7 +369,7 @@ export function createRemoteMcpBridge({
     const session = {
       scope: 'workspace', pairingId, pageId: parameters.pageId, tabId: parameters.tabId, mode: parameters.mode,
       ownerToken: randomBytes(32).toString('hex'),
-      expiresAt: now() + Math.min(parameters.durationMs, sessionTtlMs), heartbeat: now(),
+      expiresAt: parameters.durationMs === null ? null : now() + Math.min(parameters.durationMs, sessionTtlMs), heartbeat: now(),
       pending: new Map(), acknowledged: new Map(), poll: null
     };
     sessions.add(session);
@@ -431,7 +431,8 @@ export function createRemoteMcpBridge({
       const session = {
         ...grant,
         ownerToken: randomBytes(32).toString('hex'), clientToken: randomBytes(32).toString('hex'),
-        expiresAt: now() + sessionTtlMs, heartbeat: now(), pending: new Map(), acknowledged: new Map(), poll: null
+        expiresAt: grant.durationMs === null ? null : now() + Math.min(grant.durationMs ?? sessionTtlMs, sessionTtlMs),
+        heartbeat: now(), pending: new Map(), acknowledged: new Map(), poll: null
       };
       sessions.add(session);
       owners.set(session.ownerToken, session);

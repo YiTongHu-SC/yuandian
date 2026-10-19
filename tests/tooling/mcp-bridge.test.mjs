@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
+import { Client } from '@modelcontextprotocol/client';
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { createMcpBridge } from '../../scripts/mcp-bridge.mjs';
 import { PROJECT_ROOT, startDevServer } from '../../scripts/dev-server.mjs';
 
@@ -262,6 +264,75 @@ test('心跳与绝对会话到期均撤销，AI 查询不能延长浏览器心�
   assert.equal((await api('poll', { token: active.ownerToken })).status, 204);
   clock += 71;
   assert.equal((await api('poll', { token: active.ownerToken })).status, 401);
+});
+
+test('临时授权接受明确期限与永久，省略仍沿用默认，非法期限不扩大旧画布范围', async (t) => {
+  let clock = 10000;
+  const { api } = await fixture(t, { now: () => clock, heartbeatMs: 3600001 });
+  const grant = { scope: 'workspace', pageId: randomUUID() };
+  for (const durationMs of [60000, 900000, 3600000]) {
+    const response = await api('session', { body: { ...grant, durationMs } });
+    assert.equal(response.status, 201);
+    assert.equal(response.value.expiresAt, clock + durationMs);
+    const token = response.value.ownerToken;
+    clock += durationMs;
+    assert.equal((await api('poll', { token })).status, 401);
+  }
+  assert.equal((await api('session', { body: grant })).value.expiresAt, clock + 3600000);
+  const permanent = (await api('session', { body: { boardId: 'legacy', durationMs: null } })).value;
+  assert.equal(permanent.scope, 'canvas');
+  assert.equal(permanent.expiresAt, null);
+  const wider = await api('call', { browser: false, token: permanent.clientToken, body: { tool: 'list_canvases', arguments: {} } });
+  assert.equal(wider.value.code, 'scope_mismatch');
+  for (const durationMs of [false, true, 0, 59999, 3600001, 900000.5, '900000', {}, []]) {
+    assert.equal((await api('session', { body: { ...grant, durationMs } })).status, 400);
+    assert.equal((await api('session', { body: { boardId: 'legacy', durationMs } })).status, 400);
+  }
+  assert.equal((await api('session', { body: { ...grant, durationMs: null, boardId: 'legacy' } })).status, 400);
+});
+
+test('真实 stdio 永久授权超过一小时仍有效，请求有截止时间，只读、断开和失联照常生效', { timeout: 15000 }, async (t) => {
+  let clock = 10000;
+  const heartbeatMs = 10000;
+  const { api, poll } = await fixture(t, { now: () => clock, heartbeatMs });
+  async function connect() {
+    const response = await api('session', { body: { scope: 'workspace', pageId: randomUUID(), durationMs: null } });
+    assert.equal(response.status, 201);
+    assert.equal(response.value.expiresAt, null);
+    const session = response.value;
+    const client = new Client({ name: 'permanent-stdio-test', version: '1.0.0' });
+    const transport = new StdioClientTransport({ ...session.config, stderr: 'pipe' });
+    await client.connect(transport);
+    t.after(() => client.close());
+    return { session, client };
+  }
+  const { session, client } = await connect();
+  const startedAt = clock;
+  while (clock <= startedAt + 3600000) {
+    clock += 9000;
+    assert.equal((await api('poll', { token: session.ownerToken })).status, 204);
+  }
+  const status = (await client.callTool({ name: 'connection_status', arguments: {} })).structuredContent;
+  assert.equal(status.connected, true);
+  assert.equal(status.expiresAt, null);
+  assert.equal(status.mode, 'read');
+  const denied = await client.callTool({ name: 'edit_canvas', arguments: {
+    boardId: 'fictional', expectedRevision: 'a'.repeat(64), operations: [{ op: 'create_card', text: '不可写入' }]
+  } });
+  assert.equal(denied.structuredContent.code, 'read_only');
+  const reading = client.callTool({ name: 'get_canvas', arguments: { boardId: 'fictional' } });
+  const request = (await poll(session.ownerToken)).value;
+  assert.equal(Number.isFinite(request.expiresAt), true);
+  assert.ok(request.expiresAt > clock);
+  assert.ok(request.expiresAt <= clock + Math.min(15000, heartbeatMs));
+  await api('result', { token: session.ownerToken, body: { requestId: request.requestId, result: { ok: true, board: { id: 'fictional' } } } });
+  assert.equal((await reading).structuredContent.board.id, 'fictional');
+  await api('disconnect', { token: session.ownerToken });
+  assert.equal((await client.callTool({ name: 'connection_status', arguments: {} })).structuredContent.code, 'unauthorized');
+  const idle = await connect();
+  clock += heartbeatMs + 1;
+  assert.equal((await idle.client.callTool({ name: 'connection_status', arguments: {} })).structuredContent.code, 'unauthorized');
+  assert.equal((await api('poll', { token: idle.session.ownerToken })).status, 401);
 });
 
 test('交付截止时间不跨越浏览器心跳与绝对会话有效期', async (t) => {

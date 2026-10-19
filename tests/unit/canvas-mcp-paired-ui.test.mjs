@@ -78,7 +78,7 @@ function fixture(t, { paired = false, handle, editCanvas, createCanvas, readCanv
     }
     if (route === 'pairing/complete' && action.action === 'authorize') return json({
       ok: true, ownerToken, scope: 'workspace', pageId: identity.pageId,
-      mode: action.parameters.mode, expiresAt: Date.now() + action.parameters.durationMs
+      mode: action.parameters.mode, expiresAt: action.parameters.durationMs === null ? null : Date.now() + action.parameters.durationMs
     });
     if (route === 'pairing/complete') return json({ ok: true, paired: true, connected: false, state: 'needs_authorization' });
     if (route === 'poll') return aborted(options.signal);
@@ -131,6 +131,60 @@ test('首次配对先持久保存证明，再只读授权；配置只在当前�
   assert.equal(parameters.mode, 'read');
   assert.equal(parameters.durationMs, 3600000);
   assert.equal(parameters.takeover, false);
+  assert.deepEqual(f.input('本次授权时长').children.map(option => option.textContent),
+    ['15 分钟', '1 小时', '永久（直到断开）']);
+});
+
+test('永久授权可执行带期限的请求；断开立即使等待中的编辑失效', async t => {
+  let context;
+  let finish;
+  let delivered = false;
+  const waiting = new Promise(resolve => { finish = resolve; });
+  const f = fixture(t, { paired: true, handle: request => {
+    if (request.route === 'poll' && !delivered) {
+      delivered = true;
+      return json({ requestId: 'permanent-edit', tool: 'edit_canvas', arguments: {}, expiresAt: Date.now() + 10000 });
+    }
+  }, editCanvas: async (args, received) => {
+    context = received;
+    await waiting;
+    return { ok: received.isAuthorized() };
+  } });
+  await until(() => f.button('重新授权'));
+  f.input('本次授权时长').value = 'null';
+  f.input('AI 接入权限').value = 'write';
+  await f.button('重新授权').emit('click');
+  await until(() => context);
+  assert.equal(context.isAuthorized(), true);
+  assert.equal(f.panel.connected, true);
+  assert.match(f.document.querySelector('.mcp-status').textContent, /永久（直到断开）/u);
+  const parameters = f.calls.find(call => call.route === 'pairing/challenge' && call.body.action === 'authorize').body.parameters;
+  assert.equal(parameters.durationMs, null);
+  await f.button('断开授权').emit('click');
+  assert.equal(context.isAuthorized(), false);
+  finish();
+  await delay(15);
+  assert.equal(f.calls.some(call => call.route === 'result'), false);
+  assert.equal(f.input('AI 接入权限').value, 'read');
+});
+
+test('有限授权不能被服务端静默改为永久，永久也拒绝缺失期限的响应', async t => {
+  let returnedExpiry = null;
+  const f = fixture(t, { paired: true, handle: request => {
+    if (request.route === 'pairing/complete' && request.action.action === 'authorize')
+      return json({ ok: true, ownerToken: request.ownerToken, scope: 'workspace', pageId: request.identity.pageId,
+        mode: request.action.parameters.mode, ...(returnedExpiry === null ? { expiresAt: null } : {}) });
+  } });
+  await until(() => f.button('重新授权'));
+  f.input('本次授权时长').value = '900000';
+  await f.button('重新授权').emit('click');
+  assert.equal(f.panel.connected, false);
+  assert.match(f.document.querySelector('.mcp-status').textContent, /授权结果无效/u);
+  returnedExpiry = undefined;
+  f.input('本次授权时长').value = 'null';
+  await f.button('重新授权').emit('click');
+  assert.equal(f.panel.connected, false);
+  assert.equal(f.calls.filter(call => call.route === 'disconnect').length, 2);
 });
 
 test('刷新只加载配对并 attach，不恢复授权、不显示旧配置；一键授权复用配对', async t => {

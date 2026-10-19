@@ -167,7 +167,8 @@ test('开启一次授权全部画布，开启途中切换画布也不撤销', as
   assert.notEqual(f.config.value, '');
   assert.equal(f.calls.filter(call => call.route === 'disconnect').length, 0);
   const body = f.calls.find(call => call.route === 'session').body;
-  assert.deepEqual(Object.keys(body).sort(), ['mode', 'pageId', 'scope']);
+  assert.deepEqual(Object.keys(body).sort(), ['durationMs', 'mode', 'pageId', 'scope']);
+  assert.equal(body.durationMs, 3600000);
   assert.equal(body.scope, 'workspace');
   assert.match(body.pageId, /^[a-f0-9-]{36}$/u);
   assert.equal(f.document.querySelector('.mcp-scope').textContent, '授权范围：当前浏览器、当前站点的全部画布');
@@ -193,6 +194,48 @@ test('本机同样绑定页面实例，主动撤销后迟到授权不能复活',
   assert.equal(f.calls.filter(call => call.route === 'poll').length, 0);
   assert.equal(f.calls.filter(call => call.route === 'disconnect').length, 1);
   assert.match(f.calls.find(call => call.route === 'session').body.pageId, /^[a-f0-9-]{36}$/u);
+});
+
+test('本机永久授权仍约束在途写入，断开后不能保存或回传', async t => {
+  const response = deferred();
+  let context;
+  let delivered = false;
+  const f = fixture(t, { remote: false, handle: request => {
+    if (request.route === 'session') return json({ ...request.opened(), expiresAt: null });
+    if (request.route === 'poll' && !delivered) {
+      delivered = true;
+      return json({ requestId: 'permanent-edit', tool: 'edit_canvas', arguments: {}, expiresAt: Date.now() + 10000 });
+    }
+  }, editCanvas: async (args, received) => { context = received; await response.promise; return { ok: received.isAuthorized() }; } });
+  f.document.querySelector('#mcp-duration').value = 'null';
+  f.document.querySelector('#mcp-permission').value = 'write';
+  await f.button('开启接入').emit('click');
+  await until(() => context);
+  assert.equal(f.calls.find(call => call.route === 'session').body.durationMs, null);
+  assert.equal(f.panel.connected, true);
+  assert.equal(context.isAuthorized(), true);
+  assert.match(f.document.querySelector('.mcp-status').textContent, /永久（直到断开）/u);
+  await f.button('断开接入').emit('click');
+  assert.equal(context.isAuthorized(), false);
+  response.resolve();
+  await delay(15);
+  assert.equal(f.calls.some(call => call.route === 'result'), false);
+  assert.equal(f.document.querySelector('#mcp-permission').value, 'read');
+});
+
+test('本机十五分钟授权不能被响应扩大为一小时或永久', async t => {
+  let expiresAt = Date.now() + 3600000;
+  const f = fixture(t, { remote: false, handle: request => {
+    if (request.route === 'session') return json({ ...request.opened(), expiresAt });
+  } });
+  f.document.querySelector('#mcp-duration').value = '900000';
+  await f.button('开启接入').emit('click');
+  assert.equal(f.panel.connected, false);
+  assert.equal(f.calls.find(call => call.route === 'session').body.durationMs, 900000);
+  expiresAt = null;
+  await f.button('开启接入').emit('click');
+  assert.equal(f.panel.connected, false);
+  assert.equal(f.calls.filter(call => call.route === 'disconnect').length, 2);
 });
 
 test('异步读取途中 pagehide 撤销，读取完成也不向中继回传画布', async t => {
