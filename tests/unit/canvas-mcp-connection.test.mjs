@@ -10,11 +10,13 @@ test('本机接入路径和轮询频率保持兼容，只有指定 Pages 页面�
   const local = getMcpConnection(new URL('http://127.0.0.1:4176/'));
   assert.equal(local.available, true);
   assert.equal(local.remote, false);
+  assert.equal(local.paired, true);
   assert.equal(local.apiBase, '/api/mcp');
   assert.equal(local.pollDelayMs, 750);
   const online = getMcpConnection(new URL('https://yitonghu-sc.github.io/yuandian/'));
   assert.equal(online.available, true);
   assert.equal(online.remote, true);
+  assert.equal(online.paired, true);
   assert.equal(online.apiBase, 'https://stellarcore.games/yuandian-mcp/api/mcp');
   assert.equal(online.pollDelayMs, 0);
   assert.equal(getMcpConnection(new URL('https://yitonghu-sc.github.io/yuandian/index.html')).remote, true);

@@ -238,12 +238,13 @@ export function createRemoteMcpBridge({
     if (session && (!pageId || session.pageId === pageId)) return {
       ok: true, paired: true, connected: true, state: 'authorized', scope: 'workspace',
       pageId: session.pageId, mode: session.mode, expiresAt: session.expiresAt,
+      activeSessionId: session.sessionId,
       heartbeatAt: session.heartbeat
     };
     return {
       ok: true, paired: true, connected: false, scope: 'workspace',
       state: session ? 'page_in_use' : page?.state || 'needs_authorization',
-      ...(session ? { activePage: true } : {})
+      ...(session ? { activePage: true, activeSessionId: session.sessionId } : {})
     };
   }
 
@@ -290,8 +291,12 @@ export function createRemoteMcpBridge({
   }, { responseMode: 'auto', legacy: 'stateless', maxRequestBodySize: 1024 * 1024, maxSubscriptions: 0, onerror: () => {} });
 
   function validPairingAction(action, parameters) {
+    if (!object(parameters)) return false;
     const page = () => uuid.test(parameters.pageId || '') && uuid.test(parameters.tabId || '');
     if (action === 'unpair') return exactKeys(parameters, []) && !Object.keys(parameters).length;
+    if (action === 'release' && parameters.allPages === true)
+      return exactKeys(parameters, ['pageId', 'tabId', 'allPages', 'expectedSessionId']) && page() &&
+        uuid.test(parameters.expectedSessionId || '');
     if (action === 'status' || action === 'release')
       return exactKeys(parameters, ['pageId', 'tabId']) && page();
     if (action === 'attach') return exactKeys(parameters, ['pageId', 'tabId', 'reload', 'takeover']) && page() &&
@@ -354,7 +359,10 @@ export function createRemoteMcpBridge({
     const active = pairedSessions.get(pairingId);
     const samePage = active?.pageId === parameters.pageId && active?.tabId === parameters.tabId;
     if (action === 'release') {
-      if (active && !samePage) return json(409, failure('page_in_use', '此配对正在另一页面授权，不能从旧页面撤销。'));
+      if (active && parameters.allPages === true && active.sessionId !== parameters.expectedSessionId)
+        return json(409, failure('authorization_changed', '授权已更新，请重新检查后再断开。'));
+      if (active && !samePage && parameters.allPages !== true)
+        return json(409, failure('page_in_use', '此配对正在另一页面授权，不能从旧页面撤销。'));
       if (active) revoke(active);
       return json(200, pairingStatus(pairingId, parameters.pageId));
     }
@@ -367,7 +375,7 @@ export function createRemoteMcpBridge({
     if (sessions.size >= maxSessions)
       return json(429, failure('session_limit', '连接过多，请先断开不用的连接。'));
     const session = {
-      scope: 'workspace', pairingId, pageId: parameters.pageId, tabId: parameters.tabId, mode: parameters.mode,
+      scope: 'workspace', pairingId, sessionId: randomUUID(), pageId: parameters.pageId, tabId: parameters.tabId, mode: parameters.mode,
       ownerToken: randomBytes(32).toString('hex'),
       expiresAt: parameters.durationMs === null ? null : now() + Math.min(parameters.durationMs, sessionTtlMs), heartbeat: now(),
       pending: new Map(), acknowledged: new Map(), poll: null

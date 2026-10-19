@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { webcrypto } from 'node:crypto';
 import {
-  parseExistingCodexToken, pairingPageIdentity, signPairingChallenge
+  createBrowserPairingStore, parseExistingCodexToken, pairingPageIdentity, signPairingChallenge
 } from '../../src/canvas/mcp-pairing.js';
 import { REMOTE_MCP_URL } from '../../src/canvas/mcp-connection.js';
 
@@ -70,4 +70,86 @@ test('不支持 Web Locks 时不以存储的 tabId 推定页面刷新', async ()
   }, webcrypto);
   assert.notEqual(identity.tabId, previous);
   assert.equal(identity.reload, false);
+});
+
+
+// A transaction substitute checks record boundaries and replacement races.
+// Browser persistence and CryptoKey structured cloning are verified separately.
+function memoryIndexedDB() {
+  const records = new Map();
+  const db = { close() {}, createObjectStore() {}, transaction() {
+    const transaction = { pending: 0, aborted: false,
+      abort() { this.aborted = true; queueMicrotask(() => this.onabort?.()); },
+      objectStore() {
+        const operation = callback => {
+          const request = {};
+          transaction.pending++;
+          queueMicrotask(() => {
+            if (transaction.aborted) return;
+            request.result = callback();
+            request.onsuccess?.();
+            transaction.pending--;
+            queueMicrotask(() => {
+              if (!transaction.aborted && !transaction.pending) transaction.oncomplete?.();
+            });
+          });
+          return request;
+        };
+        return {
+          get: key => operation(() => records.get(key)),
+          put: (value, key) => operation(() => { records.set(key, structuredClone(value)); return key; }),
+          delete: key => operation(() => records.delete(key))
+        };
+      }
+    };
+    return transaction;
+  } };
+  return { records, open() {
+    const request = {};
+    queueMicrotask(() => { request.result = db; request.onsuccess?.(); });
+    return request;
+  } };
+}
+
+test('永久意愿独立保存且只接受权限元数据，不保存会话、凭据或画布', async () => {
+  const indexedDB = memoryIndexedDB();
+  const store = createBrowserPairingStore({ indexedDB, crypto: webcrypto });
+  const pairing = { ...await store.create(), pairingId: webcrypto.randomUUID() };
+  await store.save(pairing);
+  const consent = { version: 1, pairingId: pairing.pairingId, consentId: webcrypto.randomUUID(), mode: 'write' };
+  await store.saveConsent(consent);
+  const reopened = createBrowserPairingStore({ indexedDB, crypto: webcrypto });
+  assert.deepEqual(await reopened.loadConsent(pairing.pairingId), consent);
+  assert.deepEqual(Object.keys(indexedDB.records.get('permanent-consent')).sort(), ['consentId', 'mode', 'pairingId', 'version']);
+  assert.equal(Object.hasOwn(await reopened.load(), 'mode'), false);
+  for (const extra of [{ ownerToken: 'secret' }, { clientToken: 'secret' }, { canvas: {} }, { expiresAt: null }])
+    await assert.rejects(store.saveConsent({ ...consent, ...extra }), /永久授权记录无效/u);
+  await store.clearConsent(webcrypto.randomUUID());
+  assert.deepEqual(await store.loadConsent(pairing.pairingId), consent);
+  await store.clearConsent(pairing.pairingId);
+  assert.equal(await store.loadConsent(pairing.pairingId), null);
+});
+
+test('旧配对不能覆盖新配对意愿，损坏意愿可明确清除且取消配对一并清除', async () => {
+  const indexedDB = memoryIndexedDB();
+  const store = createBrowserPairingStore({ indexedDB, crypto: webcrypto });
+  const first = { ...await store.create(), pairingId: webcrypto.randomUUID() };
+  await store.save(first);
+  const oldConsent = { version: 1, pairingId: first.pairingId, consentId: webcrypto.randomUUID(), mode: 'read' };
+  await store.saveConsent(oldConsent);
+  const second = { ...first, pairingId: webcrypto.randomUUID() };
+  await store.save(second);
+  const consent = { ...oldConsent, pairingId: second.pairingId, consentId: webcrypto.randomUUID(), mode: 'write' };
+  await store.saveConsent(consent);
+  await assert.rejects(store.saveConsent(oldConsent), /配对已由另一页面更新/u);
+  await store.clear(first.pairingId);
+  assert.deepEqual(await store.loadConsent(second.pairingId), consent);
+  indexedDB.records.set('permanent-consent', { ...consent, ownerToken: 'invalid-record' });
+  await assert.rejects(store.loadConsent(second.pairingId), /永久授权记录无法使用/u);
+  await store.clearConsent(second.pairingId);
+  assert.equal(await store.loadConsent(second.pairingId), null);
+  await store.saveConsent(consent);
+  await store.clear(second.pairingId);
+  assert.equal(await store.load(), null);
+  assert.equal(await store.loadConsent(second.pairingId), null);
 });

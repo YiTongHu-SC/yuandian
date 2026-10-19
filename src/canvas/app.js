@@ -351,8 +351,8 @@ function toggleMcpPanel() {
   finishEdit();
   closeMenus();
   cancelConnect();
-  const available = canConnectMcp();
-  if (available !== true) return note(available);
+  // The panel must stay reachable to revoke permanent consent while saving is
+  // paused. Its authorize/restore paths check canConnectMcp themselves.
   $('.help-pop')?.remove();
   mcpPanel.toggle();
 }
@@ -1560,8 +1560,10 @@ function showRecovery() {
   el.replaceChildren();
   if (!corrupt && !conflict) return;
   mcpPanel?.close();
-  if (mcpPanel?.authorized)
-    void mcpPanel.disconnect('保存已暂停，AI 接入已断开。');
+  if (mcpPanel?.authorized) {
+    if (mcpPanel.pause) void mcpPanel.pause('保存已暂停，AI 接入暂时暂停。');
+    else void mcpPanel.disconnect('保存已暂停，AI 接入已断开。');
+  }
   el.append(
     h(
       'div',

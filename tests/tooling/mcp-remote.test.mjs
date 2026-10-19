@@ -745,6 +745,39 @@ test('刷新、跨页接管和自然期限只撤销临时授权，已交付编�
   assert.equal((await api('poll', { token: takeover.ownerToken })).status, 401);
 });
 
+test('跨页主动断开必须匹配观察到的会话，延迟撤销不能撤掉后续授权', async (t) => {
+  const { api, connect, poll } = await fixture(t);
+  const paired = await pair(api);
+  const page = { pageId: randomUUID(), tabId: randomUUID() };
+  const other = { pageId: randomUUID(), tabId: randomUUID() };
+  const client = await connect(paired);
+  const first = (await paired.complete('authorize', { ...page, mode: 'write', durationMs: null, takeover: false })).value;
+  const observed = await paired.complete('status', other);
+  assert.equal(observed.value.state, 'page_in_use');
+  assert.match(observed.value.activeSessionId, /^[a-f0-9-]{36}$/u);
+  const parameters = { ...other, allPages: true, expectedSessionId: observed.value.activeSessionId };
+  const delayed = await paired.proof('release', parameters);
+  const next = (await paired.complete('authorize', { ...page, mode: 'write', durationMs: null, takeover: false })).value;
+  assert.notEqual(next.ownerToken, first.ownerToken);
+  assert.equal((await api('pairing/complete', { body: delayed })).value.code, 'authorization_changed');
+  assert.equal((await client.callTool({ name: 'connection_status', arguments: {} })).structuredContent.connected, true);
+  const current = (await paired.complete('status', other)).value;
+  const pending = client.callTool({ name: 'edit_canvas', arguments: {
+    boardId: 'fictional', expectedRevision: 'c'.repeat(64), operations: [{ op: 'create_card', text: '不能继续旧请求' }]
+  } });
+  const request = (await poll(next.ownerToken)).value;
+  assert.equal((await paired.complete('release', { ...parameters, expectedSessionId: current.activeSessionId })).status, 200);
+  assert.equal((await pending).structuredContent.code, 'disconnected');
+  assert.equal((await api('result', { token: next.ownerToken, body: { requestId: request.requestId, result: { ok: true } } })).status, 401);
+  assert.equal((await client.callTool({ name: 'connection_status', arguments: {} })).structuredContent.connected, false);
+  assert.equal((await paired.complete('release', { ...parameters, expectedSessionId: current.activeSessionId })).status, 200);
+  for (const invalid of [
+    null, [], 'all',
+    { ...other, allPages: true }, { ...other, allPages: false, expectedSessionId: current.activeSessionId },
+    { ...other, allPages: true, expectedSessionId: 'not-a-session' }
+  ]) assert.equal((await api('pairing/challenge', { body: { pairingId: paired.pairingId, action: 'release', parameters: invalid } })).status, 400);
+});
+
 test('配对证明不可重放或跨操作替换，权限、期限与来源都需明确校验', async (t) => {
   const { api, connect } = await fixture(t);
   const paired = await pair(api);

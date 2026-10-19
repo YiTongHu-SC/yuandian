@@ -3,7 +3,7 @@ import { createPairedMcpPanel } from './mcp-paired-ui.js';
 
 export function createMcpPanel(options) {
   const connection = options.connection || getMcpConnection(window.location);
-  return connection.remote && options.pairing !== false
+  return (connection.remote || connection.paired) && options.pairing !== false
     ? createPairedMcpPanel({ ...options, connection })
     : createLegacyMcpPanel({ ...options, connection });
 }

@@ -3,10 +3,11 @@ import { REMOTE_MCP_URL } from './mcp-connection.js';
 const DATABASE = 'yuandian.mcp-pairing.v1';
 const STORE = 'pairing';
 const RECORD = 'browser';
+const CONSENT = 'permanent-consent';
 const TOKEN = /^[a-f0-9]{64}$/u;
 
-// This database contains only a device proof, never an authorization grant,
-// canvas, owner token or AI client's bearer credential.
+// Device proof and the user's optional permanent consent live separately from
+// canvas data. Session tokens, requests and client credentials are never saved.
 export function createBrowserPairingStore({
   indexedDB = globalThis.indexedDB,
   crypto = globalThis.crypto
@@ -79,6 +80,52 @@ export function createBrowserPairingStore({
     async save(record) {
       await access('readwrite', store => store.put(record, RECORD));
     },
+    async loadConsent(expectedPairingId) {
+      const record = await access('readonly', store => store.get(CONSENT));
+      if (!record || record.pairingId !== expectedPairingId) return null;
+      if (record.version !== 1 || typeof record.pairingId !== 'string' ||
+          !/^[a-f0-9-]{36}$/u.test(record.consentId || '') ||
+          !['read', 'write'].includes(record.mode) ||
+          Object.keys(record).some(key => !['version', 'pairingId', 'consentId', 'mode'].includes(key)))
+        throw new Error('永久授权记录无法使用，请断开授权后重试。');
+      return record;
+    },
+    async saveConsent(record) {
+      if (record?.version !== 1 || typeof record.pairingId !== 'string' ||
+          !/^[a-f0-9-]{36}$/u.test(record.consentId || '') || !['read', 'write'].includes(record.mode) ||
+          Object.keys(record).some(key => !['version', 'pairingId', 'consentId', 'mode'].includes(key)))
+        throw new Error('永久授权记录无效。');
+      const db = await open();
+      await new Promise((resolve, reject) => {
+        const transaction = db.transaction(STORE, 'readwrite');
+        const store = transaction.objectStore(STORE);
+        const request = store.get(RECORD);
+        let replaced = false;
+        request.onsuccess = () => {
+          if (request.result?.pairingId !== record.pairingId) {
+            replaced = true;
+            transaction.abort();
+          } else store.put(record, CONSENT);
+        };
+        transaction.oncomplete = resolve;
+        transaction.onabort = transaction.onerror = () => reject(new Error(replaced
+          ? '配对已由另一页面更新，请重新检查授权。' : '无法保存永久授权，请检查站点存储空间。'));
+      });
+    },
+    async clearConsent(expectedPairingId) {
+      const db = await open();
+      await new Promise((resolve, reject) => {
+        const transaction = db.transaction(STORE, 'readwrite');
+        const store = transaction.objectStore(STORE);
+        const request = store.get(CONSENT);
+        request.onsuccess = () => {
+          if (expectedPairingId === undefined || request.result?.pairingId === expectedPairingId)
+            store.delete(CONSENT);
+        };
+        transaction.oncomplete = resolve;
+        transaction.onabort = transaction.onerror = () => reject(new Error('无法清除永久授权，请检查站点存储权限后重试。'));
+      });
+    },
     async clear(expectedPairingId) {
       const db = await open();
       await new Promise((resolve, reject) => {
@@ -88,8 +135,10 @@ export function createBrowserPairingStore({
         request.onsuccess = () => {
           // A different tab may already have established a replacement pairing.
           // Clearing an old identity must not delete that newer device proof.
-          if (expectedPairingId === undefined || request.result?.pairingId === expectedPairingId)
+          if (expectedPairingId === undefined || request.result?.pairingId === expectedPairingId) {
             store.delete(RECORD);
+            store.delete(CONSENT);
+          }
         };
         transaction.oncomplete = resolve;
         transaction.onabort = transaction.onerror = () => reject(new Error('无法清除浏览器配对，请检查站点存储权限。'));

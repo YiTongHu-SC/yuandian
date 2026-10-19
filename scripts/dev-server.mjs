@@ -1,5 +1,7 @@
 import http from 'node:http';
-import { readFile, realpath, stat } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, readFile, realpath, stat } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -7,6 +9,27 @@ export const HOST = '127.0.0.1';
 export const DEFAULT_PORT = 4176;
 export const IDENTITY_PATH = '/__thinking_canvas_server__';
 export const PROJECT_ROOT = path.resolve(fileURLToPath(new URL('../', import.meta.url)));
+
+export function localPairingStorePath({ root, origin }, environment = process.env, platform = process.platform, home = os.homedir()) {
+  const directory = platform === 'win32'
+    ? path.join(environment.LOCALAPPDATA || path.join(home, 'AppData', 'Local'), 'Yuandian', 'Mcp')
+    : path.join(environment.XDG_STATE_HOME || path.join(home, '.local', 'state'), 'yuandian', 'mcp');
+  const endpoint = JSON.stringify({ root: platform === 'win32' ? root.toLowerCase() : root, origin });
+  return path.join(directory, `pairings-${createHash('sha256').update(endpoint).digest('hex')}.json`);
+}
+
+async function localPairingAuthority(filePath) {
+  if (!path.isAbsolute(filePath)) throw new Error('本机配对状态必须使用绝对路径。');
+  const directory = path.dirname(filePath);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const { loadPairingAuthority } = await import('./mcp-pairing-store.mjs');
+  // Canonical casing on Windows is needed by the authority's symlink checks.
+  const canonicalDirectory = await realpath(directory);
+  if (process.platform === 'win32' ? canonicalDirectory.toLowerCase() !== path.resolve(directory).toLowerCase()
+      : canonicalDirectory !== path.resolve(directory))
+    throw new Error('本机配对目录不得经过符号链接。');
+  return loadPairingAuthority({ filePath: path.join(canonicalDirectory, path.basename(filePath)) });
+}
 
 const MIME_TYPES = new Map([
   ['.html', 'text/html; charset=utf-8'],
@@ -58,11 +81,12 @@ export function parsePort(value) {
   return port;
 }
 
-export async function startDevServer({ root = PROJECT_ROOT, port = DEFAULT_PORT } = {}) {
+export async function startDevServer({ root = PROJECT_ROOT, port = DEFAULT_PORT, pairingAuthority, pairingStorePath } = {}) {
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('无效端口。');
   const canonicalRoot = await realpath(root);
   let bridge;
   let bridgeLoading;
+  let stopped = false;
   const server = http.createServer(async (request, response) => {
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
@@ -77,8 +101,12 @@ export async function startDevServer({ root = PROJECT_ROOT, port = DEFAULT_PORT 
       }
       if (request.url.startsWith('/api/mcp/')) {
         // The static canvas continues to run without MCP dependencies or helper files.
-        bridgeLoading ??= import('./mcp-bridge.mjs').then(({ createMcpBridge }) => {
-          bridge = createMcpBridge({ origin: `http://${HOST}:${server.address().port}`, root: canonicalRoot });
+        bridgeLoading ??= import('./mcp-bridge.mjs').then(async ({ createMcpBridge }) => {
+          const origin = `http://${HOST}:${server.address().port}`;
+          const authority = pairingAuthority || await localPairingAuthority(pairingStorePath ?? localPairingStorePath({ root: canonicalRoot, origin }));
+          if (stopped) { authority.close(); throw new Error('服务已停止。'); }
+          bridge = createMcpBridge({ origin, root: canonicalRoot,
+            nodePath: await realpath(process.execPath), pairingAuthority: authority });
           return bridge;
         });
         try { await (await bridgeLoading).handle(request, response); }
@@ -104,7 +132,7 @@ export async function startDevServer({ root = PROJECT_ROOT, port = DEFAULT_PORT 
       reply(500, 'Internal server error');
     }
   });
-  server.once('close', () => bridge?.close());
+  server.once('close', () => { stopped = true; bridge?.close(); });
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, HOST, () => {

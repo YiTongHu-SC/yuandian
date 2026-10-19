@@ -16,6 +16,7 @@ export function getMcpConnection(location) {
   return Object.freeze({
     available: local || remote,
     remote,
+    paired: local || remote,
     apiBase: remote ? `${REMOTE_ROOT}/api/mcp` : '/api/mcp',
     pollDelayMs: remote ? 0 : 750,
     requestTimeoutMs: 35000

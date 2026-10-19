@@ -34,7 +34,9 @@ async function until(check) {
   assert.fail('面板操作没有按期完成。');
 }
 
-function fixture(t, { paired = false, handle, editCanvas, createCanvas, readCanvas, signChallenge, locks } = {}) {
+function fixture(t, { paired = false, permanent = false, handle, editCanvas, createCanvas, readCanvas,
+  signChallenge, locks, storageFailure, remote = true, resumeDelayMs = 10, BroadcastChannel,
+  canConnect = () => true } = {}) {
   const originals = new Map();
   const nodes = [];
   const document = {
@@ -47,28 +49,47 @@ function fixture(t, { paired = false, handle, editCanvas, createCanvas, readCanv
   document.createElement('main').className = 'stage-wrap';
   document.createElement('button').setAttribute('id', 'ai-menu-toggle');
   const window = new Element('window', document);
+  window.location = { href: 'http://127.0.0.1:4176/' };
+  window.BroadcastChannel = BroadcastChannel;
   const identity = { pageId: crypto.randomUUID(), tabId: crypto.randomUUID(), reload: true };
   const clientToken = '2'.repeat(64);
   const ownerToken = '1'.repeat(64);
   let stored = paired ? { version: 1, pairingId: crypto.randomUUID(), privateKey: 'private', publicKey: { kty: 'EC' } } : null;
+  let consent = permanent && stored ? { version: 1, pairingId: stored.pairingId,
+    consentId: crypto.randomUUID(), mode: permanent === 'write' ? 'write' : 'read' } : null;
   const storeWrites = [];
   const pairingStore = {
     async load() { return stored; },
     async create() { stored = { version: 1, pairingId: null, privateKey: 'private', publicKey: { kty: 'EC' } }; storeWrites.push(structuredClone(stored)); return stored; },
     async save(record) { stored = record; storeWrites.push(structuredClone(record)); },
-    async clear() { stored = null; }
+    async clear() { stored = null; consent = null; },
+    async loadConsent(pairingId) {
+      if (storageFailure?.load) throw new Error('永久授权记录无法使用，请断开授权后重试。');
+      return consent?.pairingId === pairingId ? structuredClone(consent) : null;
+    },
+    async saveConsent(record) {
+      if (storageFailure?.save) throw new Error('模拟永久授权保存失败');
+      consent = structuredClone(record);
+      storeWrites.push(structuredClone(record));
+    },
+    async clearConsent(pairingId) {
+      if (storageFailure?.clear) throw new Error('模拟永久授权清除失败');
+      if (!pairingId || consent?.pairingId === pairingId) consent = null;
+    }
   };
   const calls = [];
   const challenges = new Map();
   const fetch = async (url, options) => {
     const route = url.split('/api/mcp/')[1];
     const body = options.body ? JSON.parse(options.body) : undefined;
-    calls.push({ route, body, options });
     const action = route === 'pairing/complete' ? challenges.get(body.challengeId) : body;
+    calls.push({ route, body, options, action });
     const custom = await handle?.({ route, body, action, options, identity, ownerToken });
     if (custom !== undefined) return custom;
     if (route === 'pairings') return json({ ok: true, pairingId: crypto.randomUUID(),
-      config: { url: REMOTE_MCP_URL, headers: { Authorization: `Bearer ${clientToken}` } } }, 201);
+      config: remote ? { url: REMOTE_MCP_URL, headers: { Authorization: `Bearer ${clientToken}` } }
+        : { command: 'node', args: ['F:/fictional/scripts/mcp-server.mjs'],
+          env: { YUANDIAN_URL: 'http://127.0.0.1:4176', YUANDIAN_MCP_TOKEN: clientToken } } }, 201);
     if (route === 'pairing/challenge') {
       const challengeId = crypto.randomUUID();
       const expiresAt = Date.now() + 30000;
@@ -77,7 +98,7 @@ function fixture(t, { paired = false, handle, editCanvas, createCanvas, readCanv
         message: JSON.stringify({ version: 1, ...body, challengeId, expiresAt, nonce: 'a'.repeat(64) }) });
     }
     if (route === 'pairing/complete' && action.action === 'authorize') return json({
-      ok: true, ownerToken, scope: 'workspace', pageId: identity.pageId,
+      ok: true, ownerToken, scope: 'workspace', pageId: action.parameters.pageId,
       mode: action.parameters.mode, expiresAt: action.parameters.durationMs === null ? null : Date.now() + action.parameters.durationMs
     });
     if (route === 'pairing/complete') return json({ ok: true, paired: true, connected: false, state: 'needs_authorization' });
@@ -94,8 +115,9 @@ function fixture(t, { paired = false, handle, editCanvas, createCanvas, readCanv
     Object.defineProperty(globalThis, key, { value, writable: true, configurable: true });
   }
   const panel = createPairedMcpPanel({
-    connection: { remote: true, available: true, apiBase: 'https://stellarcore.games/yuandian-mcp/api/mcp', pollDelayMs: 0, requestTimeoutMs: 35000 },
-    pairingStore, identity, signChallenge: signChallenge || (async () => 'signed-proof'), canConnect: () => true,
+    connection: { remote, available: true, apiBase: remote ? 'https://stellarcore.games/yuandian-mcp/api/mcp' : '/api/mcp',
+      pollDelayMs: 0, requestTimeoutMs: 35000, resumeDelayMs, maxResumeDelayMs: 30 },
+    pairingStore, identity, signChallenge: signChallenge || (async () => 'signed-proof'), canConnect,
     listCanvases: async () => ({ ok: true, boards: [] }),
     readCanvas: readCanvas || (async () => ({ ok: true })),
     editCanvas: editCanvas || (async () => ({ ok: true })),
@@ -112,7 +134,8 @@ function fixture(t, { paired = false, handle, editCanvas, createCanvas, readCanv
   });
   function fakedPageHide() { window.emit('pagehide'); }
   return {
-    panel, document, window, calls, storeWrites, stored: () => stored,
+    panel, document, window, calls, storeWrites, stored: () => stored, consent: () => consent,
+    clearSavedConsent: () => { consent = null; },
     button: text => nodes.find(node => node.tag === 'button' && node.textContent === text),
     input: label => nodes.find(node => node.attributes['aria-label'] === label)
   };
@@ -395,4 +418,255 @@ test('不支持 Web Locks 时拒绝跨页接管和取消配对，保留当前身
   assert.match(f.document.querySelector('.mcp-status').textContent, /Web Locks/u);
   assert.ok(f.stored().pairingId);
   assert.equal(f.calls.some(call => call.route === 'pairing/challenge' && ['authorize', 'unpair'].includes(call.body.action)), false);
+});
+
+
+function serialLocks() {
+  const queues = new Map();
+  return { request(name, options, callback) {
+    const operation = typeof options === 'function' ? options : callback;
+    const work = (queues.get(name) || Promise.resolve()).then(() => operation({ name }));
+    queues.set(name, work.catch(() => {}));
+    return work;
+  } };
+}
+
+test('永久读写意愿在打开时自动恢复，关闭和 BFCache 重开保留同一意愿并获取新页面身份', async t => {
+  const f = fixture(t, { paired: true, permanent: 'write' });
+  const saved = structuredClone(f.consent());
+  await until(() => f.panel.connected);
+  const grants = () => f.calls.filter(call => call.route === 'pairing/challenge' && call.body.action === 'authorize');
+  assert.equal(grants()[0].body.parameters.mode, 'write');
+  assert.equal(grants()[0].body.parameters.durationMs, null);
+  assert.equal(f.storeWrites.length, 0);
+  f.window.emit('pagehide');
+  assert.equal(f.panel.connected, false);
+  assert.deepEqual(f.consent(), saved);
+  f.window.emit('pageshow', { persisted: true });
+  await until(() => f.panel.connected && grants().length === 2);
+  assert.notEqual(grants()[0].body.parameters.pageId, grants()[1].body.parameters.pageId);
+  assert.deepEqual(f.consent(), saved);
+  assert.deepEqual(Object.keys(f.consent()).sort(), ['consentId', 'mode', 'pairingId', 'version']);
+  await f.button('断开授权').emit('click');
+  assert.equal(f.consent(), null);
+  await delay(50);
+  assert.equal(grants().length, 2);
+});
+
+test('中继重启使旧 owner 失效时，永久权限自动重签恢复且不改写意愿', async t => {
+  let polls = 0;
+  const f = fixture(t, { paired: true, permanent: 'write', handle: request => {
+    if (request.route === 'poll' && ++polls === 1)
+      return json({ ok: false, code: 'unauthorized', error: '模拟服务重启' }, 401);
+  } });
+  const saved = structuredClone(f.consent());
+  await until(() => f.panel.connected && f.calls.filter(call => call.route === 'pairing/challenge' && call.body.action === 'authorize').length === 2);
+  assert.deepEqual(f.consent(), saved);
+  assert.equal(f.storeWrites.length, 0);
+  assert.equal(f.input('AI 接入权限').value, 'write');
+});
+
+test('永久意愿遇其他活跃页面只等待，旧连接消失后自动恢复而不静默接管', async t => {
+  let occupied = true;
+  const f = fixture(t, { paired: true, permanent: true, handle: request => {
+    if (occupied && request.route === 'pairing/complete' && request.action.action === 'attach')
+      return json({ ok: false, code: 'page_in_use', error: '另一页面正在授权' }, 409);
+  } });
+  await until(() => f.calls.filter(call => call.route === 'pairing/challenge' && call.body.action === 'attach').length >= 2);
+  assert.equal(f.panel.connected, false);
+  assert.equal(f.button('断开授权').hidden, false);
+  assert.equal(f.calls.some(call => call.route === 'pairing/challenge' && call.body.action === 'authorize'), false);
+  occupied = false;
+  await until(() => f.panel.connected);
+  assert.equal(f.calls.some(call => call.body?.parameters?.takeover === true), false);
+});
+
+test('恢复签名等待时主动断开，等待锁前立即失效且迟到签名不能复活', async t => {
+  let signing = false;
+  let finish;
+  const proof = new Promise(resolve => { finish = resolve; });
+  const f = fixture(t, { paired: true, permanent: 'write', locks: serialLocks(), signChallenge: async (key, message) => {
+    if (JSON.parse(message).action === 'authorize') { signing = true; return proof; }
+    return 'signed-proof';
+  } });
+  await until(() => signing);
+  const stopping = f.button('断开授权').emit('click');
+  assert.equal(f.panel.connected, false);
+  finish('late-signature');
+  await stopping;
+  await delay(40);
+  assert.equal(f.consent(), null);
+  assert.equal(f.calls.some(call => call.route === 'pairing/complete' && call.action.action === 'authorize'), false);
+  assert.equal(f.calls.filter(call => call.route === 'pairing/complete').length, 2); // Attach and conditional status only.
+});
+
+test('永久意愿保存失败撤回新连接；清除失败保留可重试断开入口且不假报成功', async t => {
+  const failures = { save: true };
+  const f = fixture(t, { paired: true, storageFailure: failures });
+  await until(() => f.button('重新授权'));
+  f.input('本次授权时长').value = 'null';
+  await f.button('重新授权').emit('click');
+  assert.equal(f.panel.connected, false);
+  assert.equal(f.consent(), null);
+  assert.equal(f.calls.filter(call => call.route === 'disconnect').length, 1);
+  failures.save = false;
+  await f.button('重新授权').emit('click');
+  assert.equal(f.panel.connected, true);
+  failures.clear = true;
+  await f.button('断开授权').emit('click');
+  assert.ok(f.consent());
+  assert.match(f.document.querySelector('.mcp-status').textContent, /尚未完成断开/u);
+  assert.equal(f.button('断开授权').hidden, false);
+  failures.clear = false;
+  await f.button('断开授权').emit('click');
+  assert.equal(f.consent(), null);
+});
+
+test('损坏的永久意愿仍提供清除入口，无 Web Locks 时不自动恢复永久授权', async t => {
+  const failure = { load: true };
+  const f = fixture(t, { paired: true, permanent: true, storageFailure: failure, locks: false });
+  await until(() => f.button('断开授权')?.hidden === false);
+  assert.match(f.document.querySelector('.mcp-status').textContent, /永久授权记录无法使用/u);
+  await f.button('断开授权').emit('click');
+  assert.equal(f.consent(), null);
+  assert.equal(f.calls.some(call => call.body?.action === 'authorize'), false);
+});
+
+test('本机首次配对展示通用 stdio JSON，客户端凭据不进入配对和永久意愿记录', async t => {
+  const f = fixture(t, { remote: false });
+  await until(() => f.button('配对并授权'));
+  f.input('本次授权时长').value = 'null';
+  await f.button('配对并授权').emit('click');
+  const config = JSON.parse(f.input('MCP 客户端配置').value);
+  assert.equal(config.mcpServers.yuandian.command, 'node');
+  assert.equal(config.mcpServers.yuandian.env.YUANDIAN_MCP_TOKEN, '2'.repeat(64));
+  assert.equal(f.storeWrites.some(record => JSON.stringify(record).includes('2'.repeat(64))), false);
+  assert.equal(f.document.querySelector('.mcp-existing').hidden, true);
+});
+
+
+test('明确改用有限授权会清除永久意愿，到期后不恢复', async t => {
+  const f = fixture(t, { paired: true, permanent: 'write', resumeDelayMs: 5000, handle: request => {
+    if (request.route === 'pairing/complete' && request.action.action === 'authorize' && request.action.parameters.durationMs !== null)
+      return json({ ok: true, ownerToken: request.ownerToken, scope: 'workspace', pageId: request.action.parameters.pageId,
+        mode: request.action.parameters.mode, expiresAt: Date.now() + 80 });
+  } });
+  await until(() => f.panel.connected);
+  await f.panel.pause('测试暂停');
+  f.input('本次授权时长').value = '900000';
+  await f.button('重新授权').emit('click');
+  assert.equal(f.consent(), null);
+  await until(() => !f.panel.connected);
+  await delay(50);
+  assert.equal(f.calls.filter(call => call.route === 'pairing/complete' && call.action.action === 'authorize').length, 2);
+  assert.equal(f.input('AI 接入权限').value, 'read');
+});
+
+test('网页保存暂不可用时保留意愿并等待恢复，pause 同样保留权限', async t => {
+  let available = false;
+  const f = fixture(t, { paired: true, permanent: 'write', canConnect: () => available || '保存已暂停' });
+  await until(() => /永久授权保留/u.test(f.document.querySelector('.mcp-status').textContent));
+  assert.equal(f.panel.connected, false);
+  assert.ok(f.consent());
+  available = true;
+  await until(() => f.panel.connected);
+  available = false;
+  await f.panel.pause('保存已暂停');
+  assert.equal(f.panel.connected, false);
+  assert.equal(f.consent().mode, 'write');
+  await delay(50);
+  assert.equal(f.panel.connected, false);
+  available = true;
+  await until(() => f.panel.connected);
+});
+
+test('离线页主动断开先清意愿，再按签名状态中的 sessionId 条件撤销另一页面', async t => {
+  const activeSessionId = crypto.randomUUID();
+  const f = fixture(t, { paired: true, permanent: true, handle: request => {
+    if (request.route === 'pairing/complete' && request.action.action === 'attach')
+      return json({ ok: false, code: 'page_in_use', error: '另一页面正在授权' }, 409);
+    if (request.route === 'pairing/complete' && request.action.action === 'status')
+      return json({ ok: true, state: 'page_in_use', activeSessionId });
+    if (request.route === 'pairing/challenge' && request.body.action === 'status')
+      assert.equal(f.consent(), null);
+  } });
+  await until(() => f.button('改由此页授权')?.hidden === false);
+  await f.button('断开授权').emit('click');
+  const release = f.calls.find(call => call.route === 'pairing/challenge' && call.body.action === 'release');
+  assert.equal(release.body.parameters.allPages, true);
+  assert.equal(release.body.parameters.expectedSessionId, activeSessionId);
+  assert.equal(f.consent(), null);
+  assert.equal(f.button('改由此页授权').hidden, true);
+  assert.equal(f.button('重新授权').hidden, false);
+});
+
+test('没有 Web Locks 的浏览器保留既有永久意愿但不自动恢复，仍可清除', async t => {
+  const f = fixture(t, { paired: true, permanent: true, locks: false });
+  await until(() => /不支持安全恢复永久授权/u.test(f.document.querySelector('.mcp-status').textContent));
+  assert.equal(f.panel.connected, false);
+  assert.equal(f.calls.some(call => call.body?.action === 'authorize'), false);
+  await f.button('断开授权').emit('click');
+  assert.equal(f.consent(), null);
+});
+
+test('本机配置拒绝额外执行参数及非本机服务环境，不显示未知配置', async t => {
+  const f = fixture(t, { remote: false, handle: request => {
+    if (request.route === 'pairings') return json({ ok: true, pairingId: crypto.randomUUID(), config: {
+      command: 'node', args: ['--eval', 'arbitrary-code'], env: { YUANDIAN_URL: 'http://127.0.0.1:4176', YUANDIAN_MCP_TOKEN: '2'.repeat(64) }
+    } });
+  } });
+  await until(() => f.button('配对并授权'));
+  await f.button('配对并授权').emit('click');
+  assert.equal(f.input('MCP 客户端配置').value, '');
+  assert.equal(f.panel.connected, false);
+  assert.equal(f.calls.some(call => call.body?.action === 'authorize'), false);
+  assert.match(f.document.querySelector('.mcp-status').textContent, /本机客户端配置无效/u);
+});
+
+
+test('另一页面广播断开先使持锁等待中的编辑失效，不回传迟到结果', async t => {
+  let channel;
+  class Channel {
+    constructor() { channel = this; }
+    addEventListener(name, callback) { this.receive = callback; }
+    postMessage() {}
+    close() {}
+  }
+  let delivered = false;
+  let context;
+  let finish;
+  const waiting = new Promise(resolve => { finish = resolve; });
+  const f = fixture(t, { paired: true, permanent: 'write', BroadcastChannel: Channel, locks: serialLocks(), handle: request => {
+    if (request.route === 'poll' && !delivered) {
+      delivered = true;
+      return json({ requestId: 'broadcast-write', tool: 'edit_canvas', arguments: {}, expiresAt: Date.now() + 10000 });
+    }
+  }, editCanvas: async (args, received) => { context = received; await waiting; return { ok: received.isAuthorized() }; } });
+  await until(() => context);
+  assert.equal(context.isAuthorized(), true);
+  channel.receive({ data: { type: 'revoke', pairingId: f.stored().pairingId, pageId: crypto.randomUUID() } });
+  assert.equal(context.isAuthorized(), false);
+  f.clearSavedConsent();
+  finish();
+  await delay(50);
+  assert.equal(f.panel.connected, false);
+  assert.equal(f.calls.some(call => call.route === 'result'), false);
+  assert.equal(f.calls.filter(call => call.route === 'pairing/complete' && call.action.action === 'authorize').length, 1);
+});
+
+
+test('并发页面抢先授权导致本页授权被拒时，不清除原永久意愿', async t => {
+  let available = false;
+  const f = fixture(t, { paired: true, permanent: 'write', resumeDelayMs: 5000,
+    canConnect: () => available || '暂不可用', handle: request => {
+      if (request.route === 'pairing/complete' && request.action.action === 'authorize')
+        return json({ ok: false, code: 'page_in_use', error: '另一页面抢先授权' }, 409);
+    } });
+  const saved = structuredClone(f.consent());
+  await until(() => /永久授权保留/u.test(f.document.querySelector('.mcp-status').textContent));
+  available = true;
+  f.input('本次授权时长').value = '900000';
+  await f.button('重新授权').emit('click');
+  assert.deepEqual(f.consent(), saved);
+  assert.equal(f.panel.connected, false);
 });

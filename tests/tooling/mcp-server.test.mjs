@@ -7,6 +7,7 @@ import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { bridgeSettings } from '../../scripts/mcp-server.mjs';
 import { PROJECT_ROOT, startDevServer } from '../../scripts/dev-server.mjs';
+import { createMemoryPairingAuthority } from '../../scripts/mcp-pairing-store.mjs';
 
 test('stdio 目的地址严格限制回环 HTTP，拒绝无凭据、主机别名及任意路径', () => {
   const token = 'a'.repeat(64);
@@ -48,7 +49,7 @@ test(
   '真实 SDK stdio 初始化、tools/list、读取、写入、只读拒绝和断连错误',
   { timeout: 15000 },
   async (t) => {
-    const server = await startDevServer({ port: 0 });
+    const server = await startDevServer({ port: 0, pairingAuthority: createMemoryPairingAuthority() });
     const origin = `http://127.0.0.1:${server.address().port}`;
     t.after(async () => {
       server.closeAllConnections();

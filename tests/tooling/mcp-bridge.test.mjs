@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
+import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { createMcpBridge } from '../../scripts/mcp-bridge.mjs';
-import { PROJECT_ROOT, startDevServer } from '../../scripts/dev-server.mjs';
+import { PROJECT_ROOT, localPairingStorePath, startDevServer } from '../../scripts/dev-server.mjs';
+import { createMemoryPairingAuthority } from '../../scripts/mcp-pairing-store.mjs';
 
 async function fixture(t, options = {}) {
   let bridge;
@@ -75,6 +79,29 @@ async function fixture(t, options = {}) {
     assert.fail('Expected browser request was not delivered');
   }
   return { api, authorize, poll, origin };
+}
+
+async function device(api) {
+  const keys = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const created = await api('pairings', { body: { publicKey: keys.publicKey.export({ format: 'jwk' }) } });
+  assert.equal(created.status, 201);
+  const { pairingId, config } = created.value;
+  async function proof(action, parameters) {
+    const challenge = await api('pairing/challenge', { body: { pairingId, action, parameters } });
+    if (challenge.status !== 200) return { challenge };
+    return { body: {
+      pairingId, challengeId: challenge.value.challengeId,
+      signature: sign('sha256', Buffer.from(challenge.value.message), { key: keys.privateKey, dsaEncoding: 'ieee-p1363' }).toString('base64url')
+    } };
+  }
+  return {
+    pairingId, config,
+    proof,
+    async signed(action, parameters) {
+      const prepared = await proof(action, parameters);
+      return prepared.challenge || api('pairing/complete', { body: prepared.body });
+    }
+  };
 }
 
 test('授权仅可从本源画布发起，Host/Origin/自定义头缺失均拒绝且无 CORS', async (t) => {
@@ -423,7 +450,7 @@ test('排队数量包含已交付请求，满额拒绝而不会静默丢请求',
 });
 
 test('dev-server 实际提供 MCP API，同时原私有静态访问边界不变', async (t) => {
-  const server = await startDevServer({ port: 0 });
+  const server = await startDevServer({ port: 0, pairingAuthority: createMemoryPairingAuthority() });
   t.after(async () => {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
@@ -541,4 +568,170 @@ test('旧单画布授权的读取与 JSON 导出拒绝其他画布和全部备�
     assert.equal((await api('result', { token: session.ownerToken, body: { requestId: request.requestId, result: correct } })).status, 200);
     assert.deepEqual((await pending).value, correct);
   }
+});
+
+test('本机配对严格校验来源与挑战，另一页面不能静默接管，旧 owner 与旧请求不能复活', async t => {
+  const { api, poll } = await fixture(t);
+  const keys = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const publicKey = keys.publicKey.export({ format: 'jwk' });
+  for (const headers of [{ Origin: '' }, { Origin: 'https://outside.example' }, { 'X-Yuandian-Client': '' }])
+    assert.equal((await api('pairings', { body: { publicKey }, headers })).status, 403);
+  const paired = await device(api);
+  const clientToken = paired.config.env.YUANDIAN_MCP_TOKEN;
+  const call = (tool, arguments_ = {}) => api('call', { token: clientToken, browser: false, body: { tool, arguments: arguments_ } });
+  assert.equal((await call('connection_status')).value.state, 'needs_authorization');
+  assert.equal((await call('get_canvas')).value.code, 'needs_authorization');
+  const firstPage = { pageId: randomUUID(), tabId: randomUUID() };
+  const first = await paired.signed('authorize', { ...firstPage, mode: 'write', durationMs: null, takeover: false });
+  assert.equal(first.status, 201);
+  assert.equal(first.value.expiresAt, null);
+  assert.match(first.value.activeSessionId, /^[a-f0-9-]{36}$/u);
+  assert.equal((await call('connection_status')).value.activeSessionId, first.value.activeSessionId);
+  const pendingCall = call('edit_canvas', { boardId: 'fictional', expectedRevision: 'a'.repeat(64), operations: [] });
+  const pending = (await poll(first.value.ownerToken)).value;
+  const otherPage = { pageId: randomUUID(), tabId: randomUUID() };
+  assert.equal((await paired.signed('attach', { ...otherPage, reload: false, takeover: false })).value.code, 'page_in_use');
+  const otherStatus = await paired.signed('status', otherPage);
+  assert.equal(otherStatus.value.state, 'page_in_use');
+  assert.equal(otherStatus.value.activeSessionId, first.value.activeSessionId);
+  const sameTabReload = { pageId: randomUUID(), tabId: firstPage.tabId };
+  const attached = await paired.signed('attach', { ...sameTabReload, reload: true, takeover: false });
+  assert.equal(attached.status, 200);
+  assert.equal(attached.value.state, 'needs_authorization');
+  assert.equal((await pendingCall).value.code, 'disconnected');
+  assert.equal((await api('poll', { token: first.value.ownerToken })).status, 401);
+  const resumed = await paired.signed('authorize', { ...sameTabReload, mode: 'write', durationMs: null, takeover: false });
+  assert.notEqual(resumed.value.ownerToken, first.value.ownerToken);
+  assert.notEqual(resumed.value.activeSessionId, first.value.activeSessionId);
+  assert.equal((await api('result', { token: resumed.value.ownerToken, body: { requestId: pending.requestId, result: { ok: true } } })).status, 404);
+  assert.equal((await paired.signed('release', firstPage)).value.code, 'page_in_use');
+  for (const invalid of [
+    null,
+    { ...otherPage, allPages: true },
+    { ...otherPage, allPages: false, expectedSessionId: resumed.value.activeSessionId },
+    { ...otherPage, allPages: true, expectedSessionId: 'invalid' }
+  ]) assert.equal((await paired.signed('release', invalid)).status, 400);
+  assert.equal((await paired.signed('release', { ...otherPage, allPages: true, expectedSessionId: first.value.activeSessionId })).value.code, 'authorization_changed');
+  assert.equal((await call('connection_status')).value.connected, true);
+  const proof = await paired.proof('release', { ...otherPage, allPages: true, expectedSessionId: resumed.value.activeSessionId });
+  assert.equal((await api('pairing/complete', { body: proof.body })).status, 200);
+  assert.equal((await api('pairing/complete', { body: proof.body })).status, 401);
+  assert.equal((await call('connection_status')).value.connected, false);
+  const later = await paired.signed('authorize', { ...sameTabReload, mode: 'read', durationMs: null, takeover: false });
+  assert.equal((await paired.signed('release', { ...otherPage, allPages: true, expectedSessionId: resumed.value.activeSessionId })).status, 409);
+  assert.equal((await call('connection_status')).value.activeSessionId, later.value.activeSessionId);
+});
+
+test('真实 stdio 固定配对跨刷新、关闭重开及本机服务重启恢复，有限授权和主动断开均仅清除 owner', { timeout: 20000 }, async t => {
+  const temporary = await realpath(await mkdtemp(path.join(os.tmpdir(), 'yuandian-local-pairing-test-')));
+  const pairingStorePath = path.join(temporary, 'pairings.json');
+  let server = await startDevServer({ port: 0, pairingStorePath });
+  const port = server.address().port;
+  const origin = `http://127.0.0.1:${port}`;
+  let client;
+  t.after(async () => {
+    await client?.close();
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+    assert.equal(path.dirname(temporary), await realpath(os.tmpdir()));
+    assert.ok(path.basename(temporary).startsWith('yuandian-local-pairing-test-'));
+    await rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  });
+  async function api(route, { body, token, browser = true } = {}) {
+    const response = await fetch(`${origin}/api/mcp/${route}`, {
+      method: route === 'poll' ? 'GET' : 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(browser ? { Origin: origin, 'X-Yuandian-Client': 'canvas' } : {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {})
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) })
+    });
+    return { status: response.status, value: response.status === 204 ? undefined : await response.json() };
+  }
+  const paired = await device(api);
+  assert.equal(paired.config.env.YUANDIAN_URL, origin);
+  assert.equal(paired.config.command, await realpath(process.execPath));
+  client = new Client({ name: 'persistent-local-pairing-test', version: '1.0.0' });
+  await client.connect(new StdioClientTransport({ ...paired.config, stderr: 'pipe' }));
+  assert.equal((await client.listTools()).tools.length, 6);
+  const status = async () => (await client.callTool({ name: 'connection_status', arguments: {} })).structuredContent;
+  assert.equal((await status()).state, 'needs_authorization');
+  const firstPage = { pageId: randomUUID(), tabId: randomUUID() };
+  const first = (await paired.signed('authorize', { ...firstPage, mode: 'write', durationMs: null, takeover: false })).value;
+  assert.equal((await status()).mode, 'write');
+  await api('disconnect', { token: first.ownerToken, body: {} });
+  assert.equal((await status()).connected, false);
+  const reopened = { pageId: randomUUID(), tabId: randomUUID() };
+  await paired.signed('attach', { ...reopened, reload: false, takeover: false });
+  const restored = (await paired.signed('authorize', { ...reopened, mode: 'write', durationMs: null, takeover: false })).value;
+  assert.notEqual(restored.ownerToken, first.ownerToken);
+  assert.equal((await status()).mode, 'write');
+  server.closeAllConnections();
+  await new Promise(resolve => server.close(resolve));
+  server = await startDevServer({ port, pairingStorePath });
+  assert.equal((await status()).state, 'needs_authorization');
+  assert.equal((await api('poll', { token: restored.ownerToken })).status, 401);
+  const afterRestart = { pageId: randomUUID(), tabId: randomUUID() };
+  assert.equal((await paired.signed('attach', { ...afterRestart, reload: false, takeover: false })).status, 200);
+  const readOnly = (await paired.signed('authorize', { ...afterRestart, mode: 'read', durationMs: null, takeover: false })).value;
+  assert.equal((await status()).expiresAt, null);
+  assert.equal((await status()).mode, 'read');
+  const denied = await client.callTool({ name: 'edit_canvas', arguments: {
+    boardId: 'fictional', expectedRevision: 'a'.repeat(64), operations: [{ op: 'create_card', text: '不应写入' }]
+  } });
+  assert.equal(denied.structuredContent.code, 'read_only');
+  const reading = client.callTool({ name: 'get_canvas', arguments: {} });
+  let pending;
+  for (let attempt = 0; attempt < 100 && !pending; attempt++) {
+    pending = (await api('poll', { token: readOnly.ownerToken })).value;
+    if (!pending) await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(pending.tool, 'get_canvas');
+  await api('result', { token: readOnly.ownerToken, body: { requestId: pending.requestId, result: { ok: true, board: { id: 'fictional' } } } });
+  assert.equal((await reading).structuredContent.board.id, 'fictional');
+  await paired.signed('release', afterRestart);
+  assert.equal((await status()).connected, false);
+  const finite = (await paired.signed('authorize', { ...afterRestart, mode: 'read', durationMs: 900000, takeover: false })).value;
+  assert.ok(Number.isFinite(finite.expiresAt));
+  await api('disconnect', { token: finite.ownerToken, body: {} });
+  assert.equal((await status()).state, 'needs_authorization');
+  const stored = JSON.parse(await readFile(pairingStorePath, 'utf8'));
+  assert.deepEqual(Object.keys(stored.pairings[0]).sort(), ['clientHash', 'createdAt', 'pairingId', 'publicKey', 'revokedAt']);
+  assert.equal(JSON.stringify(stored).includes(paired.config.env.YUANDIAN_MCP_TOKEN), false);
+  assert.equal((await paired.signed('unpair', {})).status, 200);
+  assert.equal((await status()).code, 'unauthorized');
+  server.closeAllConnections();
+  await new Promise(resolve => server.close(resolve));
+  server = await startDevServer({ port, pairingStorePath });
+  assert.equal((await status()).code, 'unauthorized');
+});
+
+test('本机固定配对的有限期限与心跳只撤销会话，不使身份失效', async t => {
+  let clock = 1000;
+  const { api } = await fixture(t, { now: () => clock, heartbeatMs: 10000 });
+  const paired = await device(api);
+  const page = { pageId: randomUUID(), tabId: randomUUID() };
+  const callStatus = () => api('call', { browser: false, token: paired.config.env.YUANDIAN_MCP_TOKEN, body: { tool: 'connection_status', arguments: {} } });
+  const finite = await paired.signed('authorize', { ...page, mode: 'read', durationMs: 900000, takeover: false });
+  assert.equal(finite.value.expiresAt, clock + 900000);
+  clock += 900000;
+  assert.equal((await callStatus()).value.state, 'expired');
+  const permanent = await paired.signed('authorize', { ...page, mode: 'write', durationMs: null, takeover: false });
+  clock += 10001;
+  assert.equal((await callStatus()).value.connected, false);
+  assert.equal((await api('poll', { token: permanent.value.ownerToken })).status, 401);
+  assert.equal((await paired.signed('authorize', { ...page, mode: 'write', durationMs: null, takeover: false })).status, 201);
+});
+
+test('本机配对状态默认放在用户应用目录，测试可注入独立私有目录', () => {
+  const scope = { root: 'F:\\FakeProject', origin: 'http://127.0.0.1:4176' };
+  const environment = { LOCALAPPDATA: 'C:\\FakeUser\\AppData\\Local' };
+  const filename = localPairingStorePath(scope, environment, 'win32', 'C:\\FakeUser');
+  assert.equal(path.dirname(filename), path.join(environment.LOCALAPPDATA, 'Yuandian', 'Mcp'));
+  assert.match(path.basename(filename), /^pairings-[a-f0-9]{64}\.json$/u);
+  assert.equal(localPairingStorePath({ ...scope, root: scope.root.toLowerCase() }, environment, 'win32'), filename);
+  assert.notEqual(localPairingStorePath({ ...scope, origin: 'http://127.0.0.1:4198' }, environment, 'win32'), filename);
+  assert.notEqual(localPairingStorePath({ ...scope, root: 'F:\\OtherProject' }, environment, 'win32'), filename);
+  assert.equal(path.dirname(localPairingStorePath(scope, { XDG_STATE_HOME: '/fake/state' }, 'linux', '/fake/home')), path.join('/fake/state', 'yuandian', 'mcp'));
 });
