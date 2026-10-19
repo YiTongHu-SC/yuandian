@@ -1,0 +1,18 @@
+{
+  "ssh": {
+    "configFile": "deploy/remote-mcp/config/ssh_config.local",
+    "hostAlias": "yuandian-server",
+    "hostKeyFingerprint": "REPLACE_WITH_VERIFIED_SSH_HOST_KEY_FINGERPRINT"
+  },
+  "deployment": {
+    "service": "yuandian-mcp",
+    "releasesDirectory": "/srv/yuandian/mcp/releases",
+    "currentLink": "/srv/yuandian/mcp/current",
+    "nodeBinary": "/opt/yuandian-node/node-v24.22.0-linux-x64/bin/node",
+    "pairingStore": "/var/lib/yuandian-mcp/pairings.json"
+  },
+  "verification": {
+    "healthUrl": "https://stellarcore.games/yuandian-mcp/health",
+    "appUrl": "https://yitonghu-sc.github.io/yuandian/"
+  }
+}

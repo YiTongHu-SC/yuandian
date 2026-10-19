@@ -11,5 +11,24 @@ test-results/
 .env
 .env.*
 !.env.example
+
+# Server configuration is private by default; only these redacted templates are public.
+/deploy/remote-mcp/config/*
+!/deploy/remote-mcp/config/README.md
+!/deploy/remote-mcp/config/server.example.json
+!/deploy/remote-mcp/config/ssh_config.example
+!/deploy/remote-mcp/config/runtime.env.example
+!/deploy/remote-mcp/config/credentials.env.example
+
+# Common private-key / credential containers, including copies outside config/.
+*.pem
+*.key
+*.p12
+*.pfx
+*.ppk
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
 .DS_Store
 Thumbs.db

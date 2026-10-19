@@ -84,6 +84,7 @@ npm run check
 - [架构与目录](docs/architecture.md)：入口、源码职责和依赖关系。
 - [开发与验证](docs/development.md)：运行命令、检查方式和界面验证路径。
 - [GitHub Pages 部署](docs/deployment.md)：发布流程、静态资源范围和线上 / 本机数据边界。
+- [服务器配置](deploy/remote-mcp/config/README.md)：SSH、部署与运行参数示例，以及被 Git 忽略的本机凭据填写位置。
 - [数据约定](docs/data-format.md)：存储、JSON 导入导出和兼容要求。
 - [MCP 接入指南](docs/mcp.md)：线上 Codex / 本机 stdio 配置、权限、工具与错误处理。
 - [MCP 验证](docs/mcp-validation.md)：本机接入的历史验证范围与限制；本轮线上结果见部署说明。
