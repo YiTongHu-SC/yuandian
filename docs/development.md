@@ -25,6 +25,8 @@ MCP 需要支持 `/api/mcp/` 的当前 Node 服务；仅刷新页面不能更新
 
 GitHub Pages 在 `main` 更新时由 Actions 先执行完整检查，再发布 `build:pages` 的静态产物。远程 MCP 后端独立部署，通过既有 Caddy HTTPS 反向代理，不进入 Pages 产物。模板在 `deploy/remote-mcp/`；运行需设置 `YUANDIAN_PUBLIC_URL=https://stellarcore.games/yuandian-mcp`、`YUANDIAN_ALLOWED_ORIGIN=https://yitonghu-sc.github.io`、`YUANDIAN_PORT=4177` 和 `YUANDIAN_PAIRING_STORE=/var/lib/yuandian-mcp/pairings.json`。生产使用独立 systemd 用户、回环监听、单进程内存授权与私有配对目录；只有设备身份元数据落盘。部署与回退见 [部署说明](deployment.md)。线上与本机数据不自动同步。
 
+服务器连接资料统一放在 [服务器配置目录](../deploy/remote-mcp/config/README.md)。只提交其中指定的脱敏示例，真实连接、密码、私钥和主机公钥记录填写到被忽略的本机文件；已有文件不覆盖。此目录不会被应用或 systemd 自动加载，也不进入静态服务和 Pages 产物。`tests/tooling/server-config.test.mjs` 使用临时 Git 仓库与虚构文件检查实际暂存、HTTP 拒绝访问和构建排除行为，不读取本机凭据。
+
 ## 改动与检查
 
 先确认 [产品边界](../PROJECT.md)、[模块职责](architecture.md)和 [数据约定](data-format.md)。纯模型改动保留模型无 DOM 依赖；界面改动使用真实浏览器验证，模块搬迁同时核对两个入口的脚本与样式加载。

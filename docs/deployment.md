@@ -20,6 +20,8 @@ npm run build:pages
 
 ## 数据与功能边界
 
+服务器连接与参数示例集中在 [服务器配置目录](../deploy/remote-mcp/config/README.md)：`ssh_config.example`、`server.example.json`、`runtime.env.example` 和 `credentials.env.example` 可提交；实际配置使用对应的 `.local` / `.local.env` 文件，私钥、主机公钥记录及备份也留在该目录的忽略范围。`.gitignore` 仅放行说明和四个指定示例，不把 Git 忽略当作加密或对已跟踪文件的脱敏。该目录只提供填写位置，不自动修改现有 SSH、systemd、Caddy、Codex 配置或生产服务，也不自动恢复缺失的服务器凭据。
+
 - 画布保存在访问者自己的浏览器 localStorage。发布不会上传本机画布；用户开启 MCP 后，授权内容会按工具请求经过临时中继和 AI 客户端，没有云端保存服务。
 - GitHub Pages 与 `http://127.0.0.1:4176/` 属于不同站点存储，换机器、浏览器或站点地址不会自动带走内容。迁移时在来源端“文件”导出 JSON，再在目标端预览并“追加导入”；原有画布保留。
 - Pages 仍只运行静态画布和旧六步兼容入口；“AI 接入”连接下述独立 Node 中继。本机回环地址继续使用原 stdio 接入。使用方式见 [MCP 指南](mcp.md)。
@@ -160,3 +162,9 @@ Node 官方发行包的 SHA-256 已与 [官方校验清单](https://nodejs.org/d
 当前环境缺少历史部署使用的受信 SSH 配置和 `private/remote-deployment/` 资料，无法核验生产 `current`、专属 unit、配对文件或 Caddy 的实时状态，也未执行后端部署或重启。公网 `/yuandian-mcp/health` 返回正常仅证明原服务可达，不证明本次功能已部署。
 
 本次必须先部署兼容旧页面的新后端，再合入并发布 Pages；否则新页面的永久选项会被旧后端拒绝。恢复服务器连接后，从本任务已验证提交导出后端运行白名单，在独立 release 安装锁定依赖并核对文件摘要，保留上一 release，只切换并重启 `yuandian-mcp`；无需改 Caddy、unit 或配对文件。随后再确认对应 Pages 工作流与公网真实页面结果。当前不将本地测试、静态构建或原服务健康当作已上线，也不把当前聊天的线上 MCP 调用列为本轮通过。
+
+## 服务器配置目录与公开边界验证（2026-10-19）
+
+本轮仅增加服务器配置说明、四个脱敏示例及 Git 忽略规则。示例保留主机、用户、密码和主机指纹占位符，没有恢复真实凭据，也未连接、部署或重启生产后端。`ssh -G -F deploy/remote-mcp/config/ssh_config.example yuandian-server` 已实际解析通过，确认启用严格主机公钥核验、使用本目录的密钥与主机公钥记录路径；该命令不建立服务器连接。
+
+Windows `npm run verify` 的 190 项测试全部通过，静态检查覆盖 41 个 JavaScript 文件、17 个运行资源和 97 个文档本地链接；`npm run build:pages` 生成 17 个白名单运行文件。新增三项测试使用独立临时目录与虚构配置，实际执行 Git 暂存后仅说明、四个指定示例与 `.gitignore` 进入暂存区；真实配置、任意额外文件、嵌套示例、密钥及备份均被忽略。真实本机 HTTP 请求对配置路径返回 404，实际 Pages 输出目录不含部署配置。未修改前端运行资源，无需重复画布交互验收。

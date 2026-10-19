@@ -1,0 +1,11 @@
+# Copy to ssh_config.local; run ssh from the repository root with -F.
+# Replace these placeholders with the existing, trusted server connection.
+Host yuandian-server
+    HostName REPLACE_WITH_SSH_HOST_OR_IP
+    User REPLACE_WITH_SSH_USER
+    Port 22
+    IdentityFile "deploy/remote-mcp/config/keys/yuandian_ed25519"
+    UserKnownHostsFile "deploy/remote-mcp/config/known_hosts.local"
+    IdentitiesOnly yes
+    StrictHostKeyChecking yes
+    ConnectTimeout 10
