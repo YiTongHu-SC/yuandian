@@ -3,7 +3,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { PROJECT_ROOT, resolvePublicFile } from './dev-server.mjs';
 
-const ignoredDirectories = new Set(['.git', 'node_modules', 'private', 'backups', 'coverage', '.vscode', '.idea']);
+const ignoredDirectories = new Set(['.git', 'node_modules', 'dist', 'private', 'backups', 'coverage', '.vscode', '.idea']);
 
 async function projectFiles(directory) {
   const files = [];

@@ -4,7 +4,11 @@
 
 以卡片承载内容，用连线表达关系，尽量靠直觉完成书写、摆放和连接。原点追求极简的操作与界面，避免冗余功能，让用户自由组织自己的思考。
 
-当前产品形态是本机运行的自由思考画布，已支持文本卡片与连线。内容自动保存在当前浏览器，也可导出 JSON 备份。完整产品原则与当前边界见 [PROJECT.md](PROJECT.md)。
+当前产品形态是自由思考画布，已支持文本卡片与连线，可在线使用或在本机运行。内容自动保存在当前浏览器，也可导出 JSON 备份。完整产品原则与当前边界见 [PROJECT.md](PROJECT.md)。
+
+[在线使用](https://yitonghu-sc.github.io/yuandian/) · [GitHub 源码](https://github.com/YiTongHu-SC/yuandian)
+
+在线版与本机版使用各自的浏览器站点存储，不自动同步。迁移时在来源端从“文件”导出 JSON，再在目标端选择“追加导入”；发布源码不会上传本机画布。在线版提供静态画布，AI 接入需运行下述本机版本。部署方式见 [GitHub Pages 部署](docs/deployment.md)。
 
 原生 HTML、CSS 和 JavaScript ES Modules，无构建步骤，无需安装前端依赖。
 
@@ -75,6 +79,7 @@ npm run check
 - [AGENTS.md](AGENTS.md)：项目协作、隐私与交付约定。
 - [架构与目录](docs/architecture.md)：入口、源码职责和依赖关系。
 - [开发与验证](docs/development.md)：运行命令、检查方式和界面验证路径。
+- [GitHub Pages 部署](docs/deployment.md)：发布流程、静态资源范围和线上 / 本机数据边界。
 - [数据约定](docs/data-format.md)：存储、JSON 导入导出和兼容要求。
 - [MCP 接入指南](docs/mcp.md)：本机 AI 客户端配置、权限、工具与错误处理。
 - [MCP 验证](docs/mcp-validation.md)：本次接入的实际验证范围与限制。

@@ -1,6 +1,6 @@
 # 架构与目录
 
-这是一个本机运行的网页原型。浏览器直接加载 ES Modules，拥有画布数据、校验和保存职责；Node.js 提供本机服务、检查，以及可选 MCP stdio 服务和内存请求桥。浏览器端无需构建或 SDK，Node 桥不持久化画布。产品方向以 [PROJECT.md](../PROJECT.md) 为准。
+这是一个可本机运行或静态托管的网页原型。浏览器直接加载 ES Modules，拥有画布数据、校验和保存职责；Node.js 提供本机服务、检查，以及可选 MCP stdio 服务和内存请求桥。浏览器端无需构建或 SDK，Node 桥不持久化画布。产品方向以 [PROJECT.md](../PROJECT.md) 为准。
 
 ## 内容与交互基础
 
@@ -22,6 +22,7 @@ thinking-canvas/
 │  ├─ unit/                   模型和纯逻辑测试
 │  └─ tooling/                开发服务、MCP 桥与实际 stdio 测试
 ├─ scripts/                   本机服务、MCP stdio / 桥和静态检查工具
+├─ .github/workflows/         检查与 GitHub Pages 部署
 ├─ docs/                      架构、开发、数据约定
 │  └─ history/                初始化及历史验证记录
 ├─ Start.cmd / start.ps1       Windows 启动入口
@@ -30,6 +31,8 @@ thinking-canvas/
 ```
 
 `private/`、`backups/` 是可选的个人文件位置，已从 Git 忽略，也不属于应用资源。
+
+GitHub Pages 的产物由 `scripts/build-pages.mjs` 复制到已忽略的 `dist/pages/`，仅包含两个 HTML 入口及其前端资源，不包含服务脚本、依赖、测试、Git 元数据或个人目录。入口与模块使用相对路径，支持 `/yuandian/` 项目路径。线上只运行浏览器代码，本机 HTTP 回环地址才显示 AI 接入；两种部署的 localStorage 互相独立，JSON 用于显式迁移。发布流程见 [部署说明](deployment.md)。
 
 ## 自由画布
 

@@ -19,6 +19,7 @@
 - DOM、事件与界面状态归应用入口；可独立验证的模型和计算放纯模块。目录职责见 [docs/architecture.md](docs/architecture.md)。
 - 用户输入按文本渲染，不执行导入内容。模型改动须覆盖校验、关联、导入导出和存储保护。
 - MCP 的纯操作校验位于 `src/canvas/mcp-model.js`，界面授权与通信位于 `mcp-ui.js`，保存和撤销仍由 `app.js` 协调；stdio 和临时桥位于 `scripts/`。普通前端不引入 SDK 或构建步骤；MCP 使用锁定的官方 Node SDK，开发前用 `npm ci` 安装依赖。
+- GitHub Pages 使用 `npm run build:pages` 按白名单复制静态入口与前端资源，不打包 Node MCP 后端。线上不显示仅面向本机的 AI 接入；公开部署不改变本机运行、存储键或 JSON 兼容性。部署约定见 [docs/deployment.md](docs/deployment.md)。
 
 ## 数据与隐私
 
@@ -42,4 +43,4 @@
 
 - 后续改动默认使用短期 `codex/<task-name>` 分支，保留用户与其他任务修改，仅提交本任务内容。
 - 检查工作区差异、暂存内容与隐私，不自动强推或重写共享历史。
-- 当前仓库无远端；不得借用旧工作空间地址，也不得将本地提交报告为远端同步完成。
+- 用户已明确要求公开发布本项目；独立远端为 `https://github.com/YiTongHu-SC/yuandian`，不得借用旧工作空间地址。推送前复核公开内容与凭据，Pages 仅上传静态白名单产物。仅在实际推送和部署成功后报告完成，不将本地提交或工作流排队当作远端上线。

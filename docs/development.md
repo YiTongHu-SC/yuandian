@@ -13,6 +13,7 @@
 | `npm test` | 运行 `tests/unit/` 和 `tests/tooling/` 的 Node 测试 |
 | `npm run check` | 执行 `scripts/check.mjs` 项目静态检查 |
 | `npm run verify` | 依次运行静态检查与全部测试 |
+| `npm run build:pages` | 按白名单复制静态应用到 `dist/pages/`，供 GitHub Pages 发布；不生成或上传用户数据 |
 | `npm run mcp` | 启动 stdio MCP 服务；通常由 AI 客户端按页面生成的配置启动，需要有效临时环境变量 |
 
 不要直接打开本地 HTML。ES Modules 通过 HTTP 加载；用户日常入口固定为 `http://127.0.0.1:4176/`，更换 host 或端口会使用另一份浏览器站点存储。
@@ -20,6 +21,8 @@
 重复启动时需确认服务来自同一项目目录。占用端口的服务身份不符时，启动脚本应报错并保留该进程。旧 Python 服务只有在目录核验匹配后才能兼容复用；若要验证新的静态资源访问边界，应使用新的 Node 服务。
 
 MCP 需要支持 `/api/mcp/` 的当前 Node 服务；仅刷新页面不能更新已运行的旧服务代码。确认身份后重启本项目服务，勿结束无关进程。通过页面“AI 接入”生成配置，客户端会以 Node 绝对路径启动 `scripts/mcp-server.mjs`，并传入 `YUANDIAN_URL` 与 `YUANDIAN_MCP_TOKEN`；不要把真实令牌写入源码、测试记录或 Git。配置方法见 [MCP 接入指南](mcp.md)。
+
+GitHub Pages 在 `main` 更新时由 Actions 先执行完整检查，再发布 `build:pages` 的静态产物；首次启用、手动运行与部署验证见 [部署说明](deployment.md)。Pages 不运行本机服务或 MCP 桥，线上与本机数据不自动同步。
 
 ## 改动与检查
 
@@ -56,4 +59,4 @@ MCP 纯操作测试位于 `tests/unit/canvas-mcp.test.mjs`；临时桥和真实 
 
 本次 MCP 的实际结果见 [MCP 验证](mcp-validation.md)。2026-10-19 文件菜单的当次结果见 [文件菜单验证](file-menu-validation.md)；此前的 [极简交互验证](ui-validation.md)、[目录整理验证](validation.md)与 [docs/history/](history/CANVAS-VALIDATION.md)保留各自日期的范围、路径、命令和数量，不代表本轮已重新通过。每次交付说明当次运行的命令、结果和界面覆盖范围，不能仅凭目录整理或历史记录推断兼容性。
 
-检查 `git diff`、`git status` 与暂存内容，确认没有个人备份、日志、凭据或无关改动。默认分支名为 `codex/<task-name>`。当前仓库没有远端，不借用来源仓库地址，不自动推送。
+检查 `git diff`、`git status` 与暂存内容，确认没有个人备份、日志、凭据或无关改动。默认分支名为 `codex/<task-name>`。独立远端为 `https://github.com/YiTongHu-SC/yuandian`，不借用来源仓库地址。公开推送会使源码及提交历史可见；部署只上传静态白名单产物，实际结果以远端工作流和线上检查为准。

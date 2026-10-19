@@ -33,6 +33,8 @@
 
 2026-10-19 用户确认增加 MCP 配置与接入，主要用途是让 AI 通过 MCP 读写原点画布。本轮提供本机 stdio 服务和顶栏接入面板，按当前单张画布临时授权，默认只读，读写修改沿用卡片与连线并可撤销。原点不自行调用模型，不连接其他 MCP 服务；具体 AI 客户端由用户选择和配置。
 
+2026-10-19 用户要求将项目发布到 GitHub public 仓库，并部署 GitHub Pages。公开范围为项目源码与静态应用；个人画布、备份及客户端凭据不随发布上传。在线版沿用卡片、连线与 JSON 备份能力，不新增账号或跨设备同步。
+
 ## 当前能力
 
 | 领域 | 已实现 |
@@ -45,6 +47,8 @@
 | 历史兼容 | `guided.html` 保留旧六步工具，数据空间独立 |
 
 实现采用无构建步骤的原生前端，MCP stdio 接入使用官方 Node SDK。没有账号、云端数据服务、应用内模型调用或自动搜索。固定本机入口为 `http://127.0.0.1:4176/`；个人内容属于浏览器站点存储，不随源码或 Git 迁移。本机桥不持久化画布，外部 AI 客户端获得授权内容后的数据处理由该客户端决定。
+
+GitHub Pages 仅托管静态应用。在线版与本机版属于不同站点存储，不自动共享内容；用户可用 JSON 导出和追加导入迁移。线上不提供 Node MCP 后端，AI 接入入口仅在本机 HTTP 回环地址显示。
 
 ## 当前边界
 
@@ -64,4 +68,4 @@
 
 2026-10-18 从 `F:\projects\yitong-ai\tools\first-principles` 提取来源提交 `429da6f240789a2bbf136cedab00902218848328` 的可运行版本。此后产品与源码在 `F:\projects\thinking-canvas` 独立维护，旧目录保留起始快照，不在两处继续开发。
 
-当前为本地 Git 仓库，没有配置远端。不得借用旧工作空间的 GitHub / Gitea 地址。初始化、初版验证和截图归档在 [docs/history/](docs/history/INITIALIZATION.md)，其中命令和测试数量代表记录当时的状态。
+本次按用户要求独立发布到公开仓库 [YiTongHu-SC/yuandian](https://github.com/YiTongHu-SC/yuandian)，远端使用该仓库，不借用旧工作空间地址。静态部署见 [GitHub Pages 部署](docs/deployment.md)。初始化、初版验证和截图归档在 [docs/history/](docs/history/INITIALIZATION.md)，其中命令和测试数量代表记录当时的状态。

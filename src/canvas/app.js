@@ -26,6 +26,8 @@ import {
 } from './geometry.js';
 
 const $ = (s) => document.querySelector(s);
+const localMcpAvailable =
+  location.protocol === 'http:' && location.hostname === '127.0.0.1';
 const copy = (x) => structuredClone(x);
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
@@ -431,12 +433,14 @@ function build() {
           })
         )
       ),
-      button('AI 接入', toggleMcpPanel, 'ghost small', {
-        id: 'ai-menu-toggle',
-        title: 'MCP 配置与接入',
-        'aria-controls': 'mcp-panel',
-        'aria-expanded': 'false'
-      }),
+      localMcpAvailable
+        ? button('AI 接入', toggleMcpPanel, 'ghost small', {
+            id: 'ai-menu-toggle',
+            title: 'MCP 配置与接入',
+            'aria-controls': 'mcp-panel',
+            'aria-expanded': 'false'
+          })
+        : null,
       button('帮助', toggleHelp, 'ghost small')
     )
   );
