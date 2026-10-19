@@ -23,7 +23,7 @@
 
 MCP 需要支持 `/api/mcp/` 的当前 Node 服务；仅刷新页面不能更新已运行的旧服务代码。确认身份后重启本项目服务，勿结束无关进程。通过页面“AI 接入”生成配置，客户端会以 Node 绝对路径启动 `scripts/mcp-server.mjs`，并传入 `YUANDIAN_URL` 与 `YUANDIAN_MCP_TOKEN`；不要把真实令牌写入源码、测试记录或 Git。配置方法见 [MCP 接入指南](mcp.md)。
 
-GitHub Pages 在 `main` 更新时由 Actions 先执行完整检查，再发布 `build:pages` 的静态产物。远程 MCP 后端独立部署，通过既有 Caddy HTTPS 反向代理，不进入 Pages 产物。模板在 `deploy/remote-mcp/`；运行需设置 `YUANDIAN_PUBLIC_URL=https://stellarcore.games/yuandian-mcp`、`YUANDIAN_ALLOWED_ORIGIN=https://yitonghu-sc.github.io`、`YUANDIAN_PORT=4177`，生产使用独立 systemd 用户、回环监听与单进程内存会话。部署与回退见 [部署说明](deployment.md)。线上与本机数据不自动同步。
+GitHub Pages 在 `main` 更新时由 Actions 先执行完整检查，再发布 `build:pages` 的静态产物。远程 MCP 后端独立部署，通过既有 Caddy HTTPS 反向代理，不进入 Pages 产物。模板在 `deploy/remote-mcp/`；运行需设置 `YUANDIAN_PUBLIC_URL=https://stellarcore.games/yuandian-mcp`、`YUANDIAN_ALLOWED_ORIGIN=https://yitonghu-sc.github.io`、`YUANDIAN_PORT=4177` 和 `YUANDIAN_PAIRING_STORE=/var/lib/yuandian-mcp/pairings.json`。生产使用独立 systemd 用户、回环监听、单进程内存授权与私有配对目录；只有设备身份元数据落盘。部署与回退见 [部署说明](deployment.md)。线上与本机数据不自动同步。
 
 ## 改动与检查
 
@@ -33,7 +33,9 @@ GitHub Pages 在 `main` 更新时由 Actions 先执行完整检查，再发布 `
 
 MCP 卡片纯操作测试位于 `tests/unit/canvas-mcp.test.mjs`，跨画布模型与 JSON 回导测试位于 `tests/unit/canvas-mcp-workspace.test.mjs`，授权面板的异步控制流测试位于 `tests/unit/canvas-mcp-ui.test.mjs`。临时桥和真实 stdio SDK 客户端测试位于 `tests/tooling/mcp-bridge.test.mjs`、`tests/tooling/mcp-server.test.mjs`；远程 Streamable HTTP 为 `tests/tooling/mcp-remote.test.mjs`。协议测试会用虚构响应与独立回环端口，不访问日常浏览器数据；面板 DOM 替身也只验证授权控制流。它们不能替代真实页面的保存、撤销和交互验证。
 
-远程 MCP 测试需使用真实 Streamable HTTP SDK 客户端核对协议、默认只读、工作区跨画布范围、旧单画布令牌不升级、错误令牌、Origin、超时、断开和版本冲突。创建须核对 `expectedWorkspaceRevision`，编辑须明确 `boardId`；检查单张 / 全部 JSON 导出与只读允许导出、拒绝新建。模拟浏览器桥返回的结果只证明协议路径。随后在隔离页面以虚构数据验证开启一次、切换后继续读取和编辑指定目标、批量撤销、新建不切换、通知撤销新增、已有内容时拒删、刷新保存与 JSON 回导，再用实际 Codex 调用确认客户端配置。协议、Codex 与界面三类证据分开记录；服务 HTTP 可达不代表页面操作通过。
+远程 MCP 测试需使用真实 Streamable HTTP SDK 客户端核对协议、默认只读、工作区跨画布范围、旧单画布令牌不升级、错误令牌、Origin、超时、断开和版本冲突。配对还需验证持久文件仅含白名单身份字段、签名挑战单次使用且绑定操作、服务重启保留身份但清除授权、取消配对后 401；固定身份在未授权时仍可初始化和发现六个工具，状态为 `needs_authorization`，内容工具拒绝访问。创建须核对 `expectedWorkspaceRevision`，编辑须明确 `boardId`；检查单张 / 全部 JSON 导出与只读允许导出、拒绝新建。模拟浏览器桥返回的结果只证明协议路径。
+
+随后在 GPT 内置浏览器以虚构数据验证一次配对、网页重新授权、刷新、自然到期恢复、跨页显式接管及旧页失效。使用页面支持的一分钟授权等待真实到期，不能用人工断开冒充到期。再用当前 Codex 的实际工具完成刷新 / 到期前后状态、默认只读拒写、读写与导出；确认期间未修改配置或重连服务。页面另核对切换后编辑指定目标、批量撤销、新建不切换、通知撤销新增、已有内容时拒删、刷新保存与 JSON 回导。协议、当前 Codex 与界面三类证据分开记录；独立 SDK、app-server、HTTP 可达或历史结果不能代替当前聊天的实际工具成功。
 
 ## 界面验证
 
@@ -56,8 +58,9 @@ MCP 卡片纯操作测试位于 `tests/unit/canvas-mcp.test.mjs`，跨画布模�
 | MCP 跨画布 | 面板显示当前浏览器当前站点全部画布；切换、新建、删除和追加导入后接入有效；编辑明确目标 ID，不改用户活动画布；旧单画布令牌拒绝跨画布且不自动升级 |
 | MCP 读写与新建 | 先读版本，再批量创建卡片、更新、连线、删除；成功时保存已完成，在目标画布可撤销重做；新建须工作区版本且默认不切换，通知可撤销新增，已改内容时拒删 |
 | MCP 导出 | 只读可导出指定单张或全部，返回字符串及文件名，不强制浏览器下载；实际保存为文件后可追加回导，名称 / 卡片 / 关系保留且不含凭据 |
-| MCP 冲突与撤销授权 | 旧内容 / 工作区版本、无效操作、编辑中、拖动、未保存、导入和跨页冲突拒写；断开、刷新、关闭、过期后旧配置失效；等待写锁或摘要期间断开也不提交，切换不撤销授权但在途写入仍检查状态变化 |
-| 线上接入 | 保持 Pages 地址、原 localStorage 与 JSON 不变；授权只含当前页面实例所在浏览器站点的全部自由画布；未点击开启时不发送画布；异常失联 / 服务重启后需新授权，旧令牌不能恢复 |
+| MCP 冲突与撤销授权 | 旧内容 / 工作区版本、无效操作、编辑中、拖动、未保存、导入和跨页冲突拒写；断开、刷新、关闭、过期使原授权失效；等待写锁或摘要期间断开也不提交，新授权不能复活旧请求 |
+| 线上配对与恢复 | 保持 Pages 地址、原 localStorage 与 JSON 不变；固定身份与临时授权分开，未授权时仍发现工具但不读取；刷新与自然到期后只需网页授权，恢复默认只读，不改配置或重连 Codex；服务重启不恢复旧授权 |
+| 线上跨页 | 第二页不能静默抢占；明确改由此页授权后原页和在途请求失效；取消配对后固定凭据 401，清理配对不删除画布 |
 
 旧六步工具改动时，另核对记录编辑、删除解除关联、JSON 回导与刷新保存。服务改动时，核对入口 / 模块可访问、私有目录不公开、仅回环监听、重复启动复用和无关端口占用的报错。
 

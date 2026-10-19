@@ -113,6 +113,7 @@ function fixture(t, { handle, listCanvases, readCanvas, editCanvas, createCanvas
     Object.defineProperty(globalThis, key, { value, writable: true, configurable: true });
   }
   const panel = createMcpPanel({
+    pairing: false,
     getCanvas: () => current,
     canConnect: () => true,
     listCanvases: listCanvases || (async () => ({ ok: true, activeId: current.id, boards: [current] })),

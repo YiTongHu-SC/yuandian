@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { createMcpHandler } from '@modelcontextprotocol/server';
 import { createCanvasMcpServer } from './mcp-server.mjs';
 import { inspectMcpCall, inspectMcpGrant, inspectMcpResult } from './mcp-access.mjs';
+import { createMemoryPairingAuthority } from './mcp-pairing-store.mjs';
 
 const HOUR = 60 * 60 * 1000;
 const object = (value) =>
@@ -22,7 +23,13 @@ export function remoteSettings(environment = process.env) {
   const rawPort = environment.YUANDIAN_PORT || '4177';
   if (!/^[1-9]\d{0,4}$/u.test(rawPort) || Number(rawPort) > 65535)
     throw new Error('YUANDIAN_PORT 必须为 1 到 65535 的端口。');
-  return { ...validateSettings({ publicUrl, allowedOrigin }), port: Number(rawPort) };
+  const pairingStorePath = environment.YUANDIAN_PAIRING_STORE;
+  if (pairingStorePath !== undefined && (!pairingStorePath || /[\r\n\0]/u.test(pairingStorePath)))
+    throw new Error('YUANDIAN_PAIRING_STORE 必须为配对记录文件路径。');
+  return {
+    ...validateSettings({ publicUrl, allowedOrigin }), port: Number(rawPort),
+    ...(pairingStorePath ? { pairingStorePath } : {})
+  };
 }
 
 function validateSettings({ publicUrl, allowedOrigin }) {
@@ -80,7 +87,7 @@ async function readJson(request, limit) {
   }
 }
 
-/** A single-process, memory-only relay. Caddy strips the public path prefix. */
+/** Content and grants are memory-only; the authority stores pairing metadata separately. */
 export function createRemoteMcpBridge({
   publicUrl,
   allowedOrigin = 'https://yitonghu-sc.github.io',
@@ -90,7 +97,8 @@ export function createRemoteMcpBridge({
   sessionTtlMs = HOUR,
   maxSessions = 16,
   maxPending = 8,
-  now = Date.now
+  now = Date.now,
+  pairingAuthority = createMemoryPairingAuthority({ now })
 } = {}) {
   ({ publicUrl, allowedOrigin } = validateSettings({ publicUrl, allowedOrigin }));
   for (const value of [requestTimeoutMs, pollTimeoutMs, heartbeatMs, sessionTtlMs, maxSessions, maxPending])
@@ -100,6 +108,10 @@ export function createRemoteMcpBridge({
   const publicAddress = new URL(publicUrl);
   const owners = new Map();
   const clients = new Map();
+  const pairedSessions = new Map();
+  const pairedPages = new Map();
+  const unpairing = new Set();
+  const requestBindings = new WeakMap();
   const sessions = new Set();
   const rates = new Map();
   let closed = false;
@@ -149,6 +161,11 @@ export function createRemoteMcpBridge({
     sessions.delete(session);
     owners.delete(session.ownerToken);
     clients.delete(session.clientToken);
+    if (session.pairingId && pairedSessions.get(session.pairingId) === session) {
+      pairedSessions.delete(session.pairingId);
+      const page = pairedPages.get(session.pairingId);
+      if (page) page.state = reason.code === 'session_expired' ? 'expired' : 'needs_authorization';
+    }
     finishPoll(session, json(401, reason));
     for (const item of session.pending.values()) settle(session, item, reason);
     session.acknowledged.clear();
@@ -194,12 +211,53 @@ export function createRemoteMcpBridge({
 
   function authorized(token, owner = false) {
     sweep();
-    return (owner ? owners : clients).get(token);
+    const session = (owner ? owners : clients).get(token);
+    if (session?.pairingId) {
+      try {
+        if (!pairingAuthority.get(session.pairingId)) { revoke(session); return null; }
+      } catch (error) {
+        revoke(session, failure('unavailable', '配对状态暂不可用，请重新检查网页接入。'));
+        throw error;
+      }
+    }
+    return session;
   }
 
-  async function call(token, tool, arguments_, signal) {
-    const session = authorized(token);
-    if (!session) return failure('unauthorized', '连接未授权或已过期，请在原点重新授权。');
+  function clientIdentity(token) {
+    sweep();
+    const pairing = pairingAuthority.authenticate(token);
+    if (pairing) return { pairing, session: pairedSessions.get(pairing.pairingId) };
+    const session = clients.get(token);
+    return session ? { session } : null;
+  }
+
+  function pairingStatus(pairingId, pageId) {
+    sweep();
+    const session = pairedSessions.get(pairingId);
+    const page = pairedPages.get(pairingId);
+    if (session && (!pageId || session.pageId === pageId)) return {
+      ok: true, paired: true, connected: true, state: 'authorized', scope: 'workspace',
+      pageId: session.pageId, mode: session.mode, expiresAt: session.expiresAt,
+      heartbeatAt: session.heartbeat
+    };
+    return {
+      ok: true, paired: true, connected: false, scope: 'workspace',
+      state: session ? 'page_in_use' : page?.state || 'needs_authorization',
+      ...(session ? { activePage: true } : {})
+    };
+  }
+
+  async function call(token, tool, arguments_, signal, binding) {
+    const identity = clientIdentity(token);
+    if (!identity) return failure('unauthorized', '连接未授权或已过期，请在原点重新授权。');
+    const { session, pairing } = identity;
+    if (pairing && tool === 'connection_status') {
+      const callError = inspectMcpCall({ scope: 'workspace', mode: 'read' }, tool, arguments_);
+      return callError ? callError.value : pairingStatus(pairing.pairingId);
+    }
+    if (binding?.pairing && session !== binding.session)
+      return failure('authorization_changed', '请求期间网页授权已变更，请重新读取画布，不要重放编辑。');
+    if (!session) return failure('needs_authorization', '配对已保留，请在原点网页重新授权后再操作画布。');
     const callError = inspectMcpCall(session, tool, arguments_);
     if (callError) return callError.value;
     if (tool === 'connection_status') return {
@@ -227,8 +285,101 @@ export function createRemoteMcpBridge({
 
   const mcp = createMcpHandler(({ requestInfo }) => {
     const token = bearer(requestInfo);
-    return createCanvasMcpServer({ relay: (tool, input) => call(token, tool, input, requestInfo.signal) });
+    const binding = requestBindings.get(requestInfo);
+    return createCanvasMcpServer({ relay: (tool, input) => call(token, tool, input, requestInfo.signal, binding) });
   }, { responseMode: 'auto', legacy: 'stateless', maxRequestBodySize: 1024 * 1024, maxSubscriptions: 0, onerror: () => {} });
+
+  function validPairingAction(action, parameters) {
+    const page = () => uuid.test(parameters.pageId || '') && uuid.test(parameters.tabId || '');
+    if (action === 'unpair') return exactKeys(parameters, []) && !Object.keys(parameters).length;
+    if (action === 'status' || action === 'release')
+      return exactKeys(parameters, ['pageId', 'tabId']) && page();
+    if (action === 'attach') return exactKeys(parameters, ['pageId', 'tabId', 'reload', 'takeover']) && page() &&
+      typeof parameters.reload === 'boolean' && typeof parameters.takeover === 'boolean';
+    if (action === 'authorize') return exactKeys(parameters, ['pageId', 'tabId', 'mode', 'durationMs', 'takeover']) && page() &&
+      ['read', 'write'].includes(parameters.mode) && Number.isSafeInteger(parameters.durationMs) &&
+      parameters.durationMs >= 60000 && parameters.durationMs <= HOUR && typeof parameters.takeover === 'boolean';
+    return false;
+  }
+
+  async function pairingRequest(route, request, clientAddress) {
+    if (!limit(`pairing:${clientAddress}`, 60))
+      return json(429, failure('rate_limit', '配对操作过于频繁，请稍后重试。'));
+    const input = await boundedJson(request, 8192);
+    if (closed) return json(503, failure('unavailable', 'MCP 中继已停止。'));
+    if (route === '/api/mcp/pairings') {
+      if (!exactKeys(input, ['publicKey', 'clientToken']) || !object(input.publicKey) ||
+          (input.clientToken !== undefined && !/^[a-f0-9]{64}$/u.test(input.clientToken)))
+        return json(400, failure('invalid_pairing', '配对公钥或客户端凭据无效。'));
+      if (!limit(`pairing-create:${clientAddress}`, 8))
+        return json(429, failure('rate_limit', '创建配对过于频繁，请稍后重试。'));
+      const created = await pairingAuthority.create(input);
+      // The supplied key can migrate a previously configured temporary client.
+      // Its previous grant must not survive the new pairing identity.
+      const previous = clients.get(created.clientToken);
+      if (previous) revoke(previous);
+      return json(201, {
+        ok: true, pairingId: created.pairingId,
+        config: { url: `${publicUrl}/mcp`, headers: { Authorization: `Bearer ${created.clientToken}` } }
+      });
+    }
+    if (route === '/api/mcp/pairing/challenge') {
+      if (!exactKeys(input, ['pairingId', 'action', 'parameters']) || !uuid.test(input.pairingId || '') ||
+          !validPairingAction(input.action, input.parameters))
+        return json(400, failure('invalid_pairing_action', '配对操作参数无效。'));
+      if (unpairing.has(input.pairingId))
+        return json(409, failure('pairing_revoking', '正在取消此配对，请等待操作完成。'));
+      return json(200, { ok: true, ...pairingAuthority.issue(input) });
+    }
+    if (!exactKeys(input, ['pairingId', 'challengeId', 'signature']) || !uuid.test(input.pairingId || '') ||
+        !uuid.test(input.challengeId || '') || typeof input.signature !== 'string')
+      return json(400, failure('invalid_pairing_proof', '配对证明无效。'));
+    const verified = pairingAuthority.verify(input);
+    if (!pairingAuthority.get(verified.pairingId) || !validPairingAction(verified.action, verified.parameters))
+      return json(401, failure('invalid_pairing_proof', '配对已失效，请重新配对。'));
+    const { pairingId, action, parameters } = verified;
+    if (unpairing.has(pairingId))
+      return json(409, failure('pairing_revoking', '正在取消此配对，请等待操作完成。'));
+    sweep();
+    if (action === 'status') return json(200, pairingStatus(pairingId, parameters.pageId));
+    if (action === 'unpair') {
+      const previous = pairedSessions.get(pairingId);
+      if (previous) revoke(previous);
+      unpairing.add(pairingId);
+      try { await pairingAuthority.revoke(pairingId); }
+      finally { unpairing.delete(pairingId); }
+      pairedPages.delete(pairingId);
+      return json(200, { ok: true, paired: false, connected: false, state: 'unpaired' });
+    }
+    const active = pairedSessions.get(pairingId);
+    const samePage = active?.pageId === parameters.pageId && active?.tabId === parameters.tabId;
+    if (action === 'release') {
+      if (active && !samePage) return json(409, failure('page_in_use', '此配对正在另一页面授权，不能从旧页面撤销。'));
+      if (active) revoke(active);
+      return json(200, pairingStatus(pairingId, parameters.pageId));
+    }
+    const permittedReload = action === 'attach' && parameters.reload && active?.tabId === parameters.tabId;
+    if (active && !samePage && !permittedReload && !parameters.takeover)
+      return json(409, failure('page_in_use', '此配对已由另一页面授权，请明确选择改由此页授权。'));
+    if (active) revoke(active);
+    pairedPages.set(pairingId, { pageId: parameters.pageId, tabId: parameters.tabId, state: 'needs_authorization' });
+    if (action === 'attach') return json(200, pairingStatus(pairingId, parameters.pageId));
+    if (sessions.size >= maxSessions)
+      return json(429, failure('session_limit', '连接过多，请先断开不用的连接。'));
+    const session = {
+      scope: 'workspace', pairingId, pageId: parameters.pageId, tabId: parameters.tabId, mode: parameters.mode,
+      ownerToken: randomBytes(32).toString('hex'),
+      expiresAt: now() + Math.min(parameters.durationMs, sessionTtlMs), heartbeat: now(),
+      pending: new Map(), acknowledged: new Map(), poll: null
+    };
+    sessions.add(session);
+    owners.set(session.ownerToken, session);
+    pairedSessions.set(pairingId, session);
+    return json(201, {
+      ok: true, paired: true, connected: true, state: 'authorized', ownerToken: session.ownerToken,
+      scope: session.scope, pageId: session.pageId, mode: session.mode, expiresAt: session.expiresAt
+    });
+  }
 
   async function dispatch(request, { clientAddress = 'unknown' } = {}) {
     const address = new URL(request.url);
@@ -242,7 +393,8 @@ export function createRemoteMcpBridge({
       return deny(403, 'invalid_origin', '请求来源与原点页面不一致。');
     if (address.search)
       return deny(400, 'invalid_url', '此接口不接受 URL 查询参数。');
-    if (!['/health', '/mcp', '/api/mcp/session', '/api/mcp/poll', '/api/mcp/result', '/api/mcp/disconnect'].includes(route))
+    if (!['/health', '/mcp', '/api/mcp/session', '/api/mcp/poll', '/api/mcp/result', '/api/mcp/disconnect',
+      '/api/mcp/pairings', '/api/mcp/pairing/challenge', '/api/mcp/pairing/complete'].includes(route))
       return deny(404, 'not_found', '未知 MCP 路径。');
     const allowedMethods = route === '/health' || route === '/api/mcp/poll' ? ['GET'] : ['POST'];
     if (request.method === 'OPTIONS') {
@@ -263,6 +415,8 @@ export function createRemoteMcpBridge({
     if (browserRoute && (origin !== allowedOrigin || request.headers.get('x-yuandian-client') !== 'canvas'))
       return deny(403, 'invalid_client', '授权与画布通信必须由原点页面发起。');
     sweep();
+    if (route === '/api/mcp/pairings' || route.startsWith('/api/mcp/pairing/'))
+      return await pairingRequest(route, request, clientAddress);
     if (route === '/api/mcp/session') {
       if (!limit(`create:${clientAddress}`, 8))
         return deny(429, 'rate_limit', '开启接入过于频繁，请稍后重试。');
@@ -289,8 +443,9 @@ export function createRemoteMcpBridge({
       });
     }
     const token = bearer(request);
-    const session = authorized(token, browserRoute);
-    if (!session) {
+    const identity = browserRoute ? null : clientIdentity(token);
+    const session = browserRoute ? authorized(token, true) : identity?.session;
+    if (browserRoute ? !session : !identity) {
       if (!limit(`invalid:${clientAddress}`, 120)) return deny(429, 'rate_limit', '请求过于频繁，请稍后重试。');
       return json(401, failure('unauthorized', '连接未授权或已过期，请在原点重新授权。'), { 'WWW-Authenticate': 'Bearer realm="yuandian-canvas"' });
     }
@@ -298,7 +453,10 @@ export function createRemoteMcpBridge({
       return deny(429, 'rate_limit', '请求过于频繁，请稍后重试。');
     if (!browserRoute) {
       const input = await boundedJson(request, 1024 * 1024);
-      if (authorized(token) !== session) return deny(401, 'unauthorized', '授权已过期，请重新开启接入。');
+      const current = clientIdentity(token);
+      if (!current || (identity.pairing ? current.pairing?.pairingId !== identity.pairing.pairingId : current.session !== session))
+        return deny(401, 'unauthorized', '配对或授权已失效，请在原点重新开启接入。');
+      requestBindings.set(request, identity);
       return await mcp.fetch(request, { parsedBody: input });
     }
     session.heartbeat = now();
@@ -349,7 +507,14 @@ export function createRemoteMcpBridge({
       let response;
       try { response = await dispatch(request, metadata); }
       catch (error) {
-        response = json(error.status || 500, failure(error.status ? 'invalid_request' : 'internal_error', error.status ? error.message : 'MCP 请求未完成，请重新连接。'));
+        if (error.pairingStoreUncertain || error.status === 503 && error.code === 'unavailable') {
+          // An uncertain durable identity state must not leave owner requests
+          // or other paired grants alive while HTTP client auth fails closed.
+          closed = true;
+          clearInterval(timer);
+          for (const session of sessions) revoke(session, failure('unavailable', '配对状态暂不可用，请等待服务恢复后重新授权。'));
+        }
+        response = json(error.status || 500, failure(error.status ? error.code || 'invalid_request' : 'internal_error', error.status ? error.message : 'MCP 请求未完成，请重新连接。'));
       }
       response.headers.set('Cache-Control', 'no-store');
       response.headers.set('X-Content-Type-Options', 'nosniff');
@@ -366,6 +531,8 @@ export function createRemoteMcpBridge({
       clearInterval(timer);
       for (const session of sessions) revoke(session);
       rates.clear();
+      pairedPages.clear();
+      pairingAuthority.close();
       await mcp.close();
     }
   };

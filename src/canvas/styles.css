@@ -747,6 +747,24 @@ a {
   padding-top: 12px;
   border-top: 1px solid var(--line);
 }
+.mcp-options {
+  margin-top: 12px;
+  color: #6e8068;
+}
+.mcp-options summary {
+  cursor: pointer;
+}
+.mcp-options p {
+  margin-top: 8px;
+  font-size: 11px;
+}
+.mcp-options button {
+  margin-top: 10px;
+  min-height: 36px;
+}
+.mcp-existing {
+  margin-top: 12px;
+}
 .mcp-configuration summary {
   cursor: pointer;
   font-weight: 600;

@@ -66,9 +66,9 @@ Node 官方发行包的 SHA-256 已与 [官方校验清单](https://nodejs.org/d
 
 当前后端负载严格限定九个文件：`package.json`、`package-lock.json`、`scripts/mcp-server.mjs`、`scripts/mcp-remote-server.mjs`、`scripts/mcp-remote-bridge.mjs`、`scripts/mcp-access.mjs`、`src/canvas/mcp-model.js`、`src/canvas/mcp-workspace-model.js`、`src/canvas/model.js`。首次部署为七个文件，工作区授权增加共享权限校验与跨画布纯模型两项。从已核验提交取字节、记录清单和 SHA-256；服务器独立新版本目录执行 `npm ci --omit=dev --ignore-scripts --no-audit --no-fund`，不上传完整仓库、画布、测试或个人资料。
 
-服务模板见 [systemd](../deploy/remote-mcp/yuandian-mcp.service) 与 [Caddy 路由片段](../deploy/remote-mcp/stellarcore-route.caddy)。模板不是服务器完整配置：需先读取当前 Caddyfile，备份并保留其他站点原文，将主站原 `try_files` / `file_server` 纳入模板的字面顺序路由。单独在原全站 `try_files` 旁追加反代可能先被重写为首页，必须用 `caddy validate` 和 `caddy adapt` 检查最终顺序。该路径使用 `log_skip`，Node 也不记录正文或令牌。
+服务模板见 [systemd](../deploy/remote-mcp/yuandian-mcp.service) 与 [Caddy 路由片段](../deploy/remote-mcp/stellarcore-route.caddy)。模板随最新配对实现增加专用状态目录，以下首次部署记录描述当时版本。模板不是服务器完整配置：需先读取当前 Caddyfile，备份并保留其他站点原文，将主站原 `try_files` / `file_server` 纳入模板的字面顺序路由。单独在原全站 `try_files` 旁追加反代可能先被重写为首页，必须用 `caddy validate` 和 `caddy adapt` 检查最终顺序。该路径使用 `log_skip`，Node 也不记录正文或令牌。
 
-核对目录与服务身份后，原子切换 `current`，安装专属 unit，执行 `systemctl daemon-reload` 和 `systemctl enable --now yuandian-mcp`；先通过带 `Host: stellarcore.games` 的本机 `/health`，再验证和 reload Caddy，最后检查公网健康和现有站点指纹。服务账户没有持久写目录，启用 `ProtectSystem=strict`、`ProtectHome`、空 capabilities、仅回环网络、384 MiB 内存与 64 task 限额。
+核对目录与服务身份后，原子切换 `current`，安装专属 unit，执行 `systemctl daemon-reload` 和 `systemctl enable --now yuandian-mcp`；先通过带 `Host: stellarcore.games` 的本机 `/health`，再验证和 reload Caddy，最后检查公网健康和现有站点指纹。首次部署的服务账户没有持久写目录，启用 `ProtectSystem=strict`、`ProtectHome`、空 capabilities、仅回环网络、384 MiB 内存与 64 task 限额；后续配对更新只为身份元数据增加专用受限目录，不改变画布保存位置。
 
 失败时保留发布包，撤回新增路径、unit 和本服务的 current 链接，恢复已核验的原配置并再次验证。已有服务更新时，保留上一 release，原子切回并重启；重启必然撤销内存授权，浏览器持久数据不迁移。恢复配置前比较活动哈希，若其他任务已修改 Caddy 则先合并，不能覆盖其改动。Pages 可通过恢复先前提交触发重新发布，保持页面地址与存储键不变。
 
@@ -103,3 +103,13 @@ Node 官方发行包的 SHA-256 已与 [官方校验清单](https://nodejs.org/d
 - 公网页面继续完成中文多行编辑、Tab 分支、跨分支连接、拖动，并通过 MCP 导出三张画布（验证 A 为三卡三线）。实际下载该 JSON，再由页面文件选择器预览、追加回导成为六张，原画布保留，同一会话能列举导入结果。等待保存后刷新，中文、三卡三线和位置保留，面板恢复未开启与默认只读，旧客户端再次拒绝；本轮控制台无警告或错误。测试授权已撤销，未替换用户全局客户端配置。
 
 [本轮公网页面截图](../assets/screenshots/mcp-workspace-online.jpg)仅包含虚构测试内容，记录刷新后仍保留的画布和新版授权范围，不包含令牌。它与本轮公网实际结果补齐此前受浏览器控制超时阻碍的主路径；历史记录仍保留原有范围。关闭测试标签和临时本机验证服务，不清空站点数据。
+
+## 线上一次配对与重新授权（2026-10-19）
+
+本次将线上固定客户端身份与临时画布授权分开，继续复用同一 HTTPS 中继，不增加账号、云同步、画布数据库或本机常驻程序。首次配对后配置保持不变；刷新、关闭后重开、到期或中继重启只需在网页重新授权。授权默认只读，最长一小时，可主动选择十五分钟或一分钟；多页改由当前页接入须明确操作。旧远程临时配置及本机 stdio 保持原流程。
+
+后端需在独立 release 安装锁定依赖，并为现有专属 unit 增加 `StateDirectory=yuandian-mcp`、`StateDirectoryMode=0700` 和 `YUANDIAN_PAIRING_STORE=/var/lib/yuandian-mcp/pairings.json`。该目录只保存配对 ID、客户端凭据哈希、浏览器公钥、创建 / 撤销时间；临时授权、页面令牌、请求、返回内容和画布不落盘。`ProtectSystem=strict` 及其他隔离继续生效。发布前核对当前 unit、`current` 和 Caddy 哈希，保留专属 unit 与前一 release 的可恢复备份；本次不需要修改 Caddy 路由。
+
+先更新兼容旧临时接口的后端，再发布 Pages。回退只切回已核对的 release 和相应 unit，不删除独立配对文件；旧版本不读取该文件，仍可使用其原临时接入。升级或回退重启均清除临时授权，浏览器画布不迁移、不重置。失效的配对凭据继续 HTTP 401；有效配对没有页面授权时可完成工具发现，但内容工具返回 `needs_authorization`。
+
+本节发布与验收结果待本轮实际执行后补记。需要分别记录：源码 / 后端 release / Pages 工作流、公开资源一致性；协议和权限测试；当前聊天 Codex 在同一固定配置下的配对、刷新恢复、自然到期恢复、默认只读拒写和读写导出；GPT 内置浏览器的实际授权、保存与跨页行为。不得用旧记录、独立协议客户端或 HTTP 健康检查代替当前 Codex 工具调用。

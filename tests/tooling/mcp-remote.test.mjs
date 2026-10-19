@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm, symlink } from 'node:fs/promises';
+import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
+import { chmod, mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,12 +10,37 @@ import { fileURLToPath } from 'node:url';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { createRemoteMcpBridge, remoteSettings } from '../../scripts/mcp-remote-bridge.mjs';
 import { startRemoteMcpServer } from '../../scripts/mcp-remote-server.mjs';
+import { createMemoryPairingAuthority } from '../../scripts/mcp-pairing-store.mjs';
 import { LIMITS, connect, createBoard, createNode, createWorkspace, exportJSON, parseImport } from '../../src/canvas/model.js';
 
 const publicUrl = 'https://relay.example/yuandian-mcp';
 const allowedOrigin = 'https://yitonghu-sc.github.io';
 const hostname = 'relay.example';
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function pair(api, { clientToken } = {}) {
+  const { publicKey, privateKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const response = await api('pairings', { body: {
+    publicKey: publicKey.export({ format: 'jwk' }), ...(clientToken ? { clientToken } : {})
+  } });
+  assert.equal(response.status, 201);
+  const pairingId = response.value.pairingId;
+  async function proof(action, parameters) {
+    const challenge = await api('pairing/challenge', { body: { pairingId, action, parameters } });
+    assert.equal(challenge.status, 200);
+    return {
+      pairingId, challengeId: challenge.value.challengeId,
+      signature: sign('sha256', Buffer.from(challenge.value.message), { key: privateKey, dsaEncoding: 'ieee-p1363' }).toString('base64url')
+    };
+  }
+  async function complete(action, parameters) {
+    return await api('pairing/complete', { body: await proof(action, parameters) });
+  }
+  return {
+    pairingId, clientToken: response.value.config.headers.Authorization.slice(7),
+    config: response.value.config, proof, complete
+  };
+}
 
 test('CLI 从 current 目录符号链接或 junction 启动后实际监听并通过健康检查', { timeout: 15000 }, async (t) => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), 'yuandian-remote-cli-'));
@@ -573,4 +598,216 @@ test('接近二百万字符的有效中文 v1 全部导出经真实 HTTP SDK 完
   // MCP carries both structured content and a text representation; neither is truncated by the transport.
   const textCopy = JSON.parse(received.content[0].text.slice(received.content[0].text.indexOf('\n') + 1));
   assert.equal(textCopy.json, json);
+});
+
+test('固定配对凭据无授权时仍可初始化与发现六工具，同一 SDK 连接在重新授权后立即恢复', async (t) => {
+  const { api, connect, poll } = await fixture(t);
+  const paired = await pair(api);
+  const page = { pageId: randomUUID(), tabId: randomUUID() };
+  const client = await connect(paired);
+  assert.equal((await client.listTools()).tools.length, 6);
+  const state = async () => (await client.callTool({ name: 'connection_status', arguments: {} })).structuredContent;
+  assert.deepEqual(await state(), { ok: true, paired: true, connected: false, scope: 'workspace', state: 'needs_authorization' });
+  assert.equal((await client.callTool({ name: 'list_canvases', arguments: {} })).structuredContent.code, 'needs_authorization');
+  const granted = await paired.complete('authorize', { ...page, mode: 'read', durationMs: 3600000, takeover: false });
+  assert.equal(granted.status, 201);
+  assert.equal(granted.value.mode, 'read');
+  assert.equal('config' in granted.value, false);
+  assert.equal((await state()).connected, true);
+  assert.equal((await client.callTool({ name: 'create_canvas', arguments: { expectedWorkspaceRevision: 'a'.repeat(64) } })).structuredContent.code, 'read_only');
+  const reading = client.callTool({ name: 'list_canvases', arguments: {} });
+  const request = (await poll(granted.value.ownerToken)).value;
+  const result = { ok: true, activeId: 'fictional-board', workspaceRevision: 'b'.repeat(64), boards: [{ id: 'fictional-board' }] };
+  assert.equal((await api('result', { token: granted.value.ownerToken, body: { requestId: request.requestId, result } })).status, 200);
+  assert.deepEqual((await reading).structuredContent, result);
+  assert.equal((await api('disconnect', { token: granted.value.ownerToken, body: {} })).status, 200);
+  assert.equal((await state()).state, 'needs_authorization');
+  assert.equal((await client.listTools()).tools.length, 6);
+  const renewed = await paired.complete('authorize', { ...page, mode: 'write', durationMs: 60000, takeover: false });
+  assert.equal(renewed.status, 201);
+  assert.notEqual(renewed.value.ownerToken, granted.value.ownerToken);
+  assert.equal((await state()).mode, 'write');
+  const exporting = client.callTool({ name: 'export_canvas', arguments: { all: true } });
+  const exportRequest = (await poll(renewed.value.ownerToken)).value;
+  const exported = { ok: true, json: JSON.stringify({ version: 1, activeId: 'fictional-board', boards: [{ id: 'fictional-board' }] }), filename: '全部画布.json', mimeType: 'application/json' };
+  await api('result', { token: renewed.value.ownerToken, body: { requestId: exportRequest.requestId, result: exported } });
+  assert.deepEqual((await exporting).structuredContent, exported);
+});
+
+test('刷新、跨页接管和自然期限只撤销临时授权，已交付编辑不重放，取消配对才使固定凭据 401', async (t) => {
+  let clock = 10000;
+  const { api, connect, poll } = await fixture(t, { now: () => clock, heartbeatMs: 90000 });
+  const paired = await pair(api);
+  const page = { pageId: randomUUID(), tabId: randomUUID() };
+  const client = await connect(paired);
+  const first = (await paired.complete('authorize', { ...page, mode: 'write', durationMs: 60000, takeover: false })).value;
+  const editing = client.callTool({ name: 'edit_canvas', arguments: { boardId: 'fictional', expectedRevision: 'c'.repeat(64), operations: [{ op: 'create_card', text: '不重放' }] } });
+  const delivered = (await poll(first.ownerToken)).value;
+  const otherPage = { pageId: randomUUID(), tabId: randomUUID() };
+  assert.equal((await paired.complete('attach', { ...otherPage, reload: false, takeover: false })).value.code, 'page_in_use');
+  assert.equal((await paired.complete('authorize', { ...otherPage, mode: 'read', durationMs: 60000, takeover: false })).status, 409);
+  assert.equal((await paired.complete('release', otherPage)).status, 409);
+  const refresh = { pageId: randomUUID(), tabId: page.tabId };
+  assert.equal((await paired.complete('attach', { ...refresh, reload: true, takeover: false })).status, 200);
+  assert.equal((await editing).structuredContent.code, 'disconnected');
+  assert.equal((await api('result', { token: first.ownerToken, body: { requestId: delivered.requestId, result: { ok: true } } })).status, 401);
+  assert.equal((await client.callTool({ name: 'get_canvas', arguments: {} })).structuredContent.code, 'needs_authorization');
+  const second = (await paired.complete('authorize', { ...refresh, mode: 'read', durationMs: 60000, takeover: false })).value;
+  assert.equal((await api('poll', { token: second.ownerToken })).status, 204);
+  clock += 60001;
+  const expired = (await client.callTool({ name: 'connection_status', arguments: {} })).structuredContent;
+  assert.equal(expired.state, 'expired');
+  assert.equal(expired.connected, false);
+  assert.equal((await client.listTools()).tools.length, 6);
+  assert.equal((await api('poll', { token: second.ownerToken })).status, 401);
+  const third = (await paired.complete('authorize', { ...refresh, mode: 'read', durationMs: 60000, takeover: false })).value;
+  assert.equal(third.mode, 'read');
+  const takeover = (await paired.complete('authorize', { ...otherPage, mode: 'read', durationMs: 60000, takeover: true })).value;
+  assert.equal((await api('poll', { token: third.ownerToken })).status, 401);
+  assert.equal((await api('poll', { token: takeover.ownerToken })).status, 204);
+  assert.equal((await paired.complete('unpair', {})).value.paired, false);
+  await assert.rejects(() => client.callTool({ name: 'connection_status', arguments: {} }), /unauthorized/u);
+  assert.equal((await api('poll', { token: takeover.ownerToken })).status, 401);
+});
+
+test('配对证明不可重放或跨操作替换，权限、期限与来源都需明确校验', async (t) => {
+  const { api, connect } = await fixture(t);
+  const paired = await pair(api);
+  const page = { pageId: randomUUID(), tabId: randomUUID() };
+  const proof = await paired.proof('authorize', { ...page, mode: 'read', durationMs: 60000, takeover: false });
+  assert.equal((await api('pairing/complete', { body: { ...proof, mode: 'write' } })).status, 400);
+  assert.equal((await api('pairing/complete', { body: proof, headers: { Origin: 'https://outside.example' } })).status, 403);
+  assert.equal((await api('pairing/complete', { body: proof })).status, 201);
+  assert.equal((await api('pairing/complete', { body: proof })).status, 401);
+  assert.equal((await connect(paired).then(client => client.callTool({ name: 'connection_status', arguments: {} }))).structuredContent.mode, 'read');
+  for (const parameters of [
+    { ...page, mode: 'write', durationMs: 59999, takeover: false },
+    { ...page, mode: 'write', durationMs: 3600001, takeover: false },
+    { ...page, mode: 'admin', durationMs: 60000, takeover: false },
+    { ...page, mode: 'write', durationMs: 60000 },
+    { ...page, mode: 'write', durationMs: 60000, takeover: false, extra: 'unexpected' }
+  ]) assert.equal((await api('pairing/challenge', { body: { pairingId: paired.pairingId, action: 'authorize', parameters } })).status, 400);
+  const malformed = await paired.proof('release', page);
+  assert.equal((await api('pairing/complete', { body: { ...malformed, signature: 'A'.repeat(86) } })).status, 401);
+  assert.equal((await api('pairing/complete', { body: malformed })).status, 401);
+});
+
+test('已有客户端凭据可一次迁移为配对身份，沿用现有 SDK，无需修改配置或建立新传输', async (t) => {
+  const { api, authorize, connect } = await fixture(t);
+  const legacy = await authorize('write');
+  const client = await connect(legacy);
+  const paired = await pair(api, { clientToken: legacy.clientToken });
+  assert.equal(paired.clientToken, legacy.clientToken);
+  assert.deepEqual(paired.config, legacy.config);
+  assert.equal((await api('poll', { token: legacy.ownerToken })).status, 401);
+  const status = (await client.callTool({ name: 'connection_status', arguments: {} })).structuredContent;
+  assert.equal(status.paired, true);
+  assert.equal(status.connected, false);
+  const page = { pageId: randomUUID(), tabId: randomUUID() };
+  await paired.complete('authorize', { ...page, mode: 'read', durationMs: 60000, takeover: false });
+  assert.equal((await client.callTool({ name: 'connection_status', arguments: {} })).structuredContent.mode, 'read');
+});
+
+test('服务重启只恢复配对身份，不恢复授权、令牌、请求或内容，固定 SDK 凭据可继续连接', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'yuandian-pairing-http-'));
+  assert.equal(path.dirname(directory), path.resolve(os.tmpdir()));
+  assert.ok(path.basename(directory).startsWith('yuandian-pairing-http-'));
+  await chmod(directory, 0o700);
+  const pairingStorePath = path.join(directory, 'pairings.json');
+  const first = await fixture(t, { pairingStorePath });
+  const paired = await pair(first.api);
+  const page = { pageId: randomUUID(), tabId: randomUUID() };
+  const granted = (await paired.complete('authorize', { ...page, mode: 'write', durationMs: 60000, takeover: false })).value;
+  const persisted = await readFile(pairingStorePath, 'utf8');
+  for (const secret of [paired.clientToken, granted.ownerToken, page.pageId, 'expiresAt', 'mode', 'nodes', 'edges', 'pending'])
+    assert.equal(persisted.includes(secret), false);
+  first.server.closeAllConnections();
+  await new Promise(resolve => first.server.close(resolve));
+  const second = await fixture(t, { pairingStorePath });
+  const client = await second.connect(paired);
+  assert.equal((await client.listTools()).tools.length, 6);
+  const state = (await client.callTool({ name: 'connection_status', arguments: {} })).structuredContent;
+  assert.equal(state.paired, true);
+  assert.equal(state.connected, false);
+  assert.equal(state.state, 'needs_authorization');
+  assert.equal((await second.api('poll', { token: granted.ownerToken })).status, 401);
+  // This exact generated directory is checked above; registered after server cleanup.
+  t.after(() => rm(directory, { recursive: true, force: true }));
+});
+
+test('读取慢 MCP 正文期间的重新授权不能把旧请求交给新授权，固定身份仍保持有效', async () => {
+  const bridge = createRemoteMcpBridge({ publicUrl, allowedOrigin, pollTimeoutMs: 10 });
+  const headers = { Host: hostname, Origin: allowedOrigin, 'X-Yuandian-Client': 'canvas', 'Content-Type': 'application/json' };
+  async function api(route, { body } = {}) {
+    const response = await bridge.fetch(new Request(`https://${hostname}/api/mcp/${route}`, { method: 'POST', headers, body: JSON.stringify(body) }));
+    return { status: response.status, value: await response.json() };
+  }
+  try {
+    const paired = await pair(api);
+    const page = { pageId: randomUUID(), tabId: randomUUID() };
+    await paired.complete('authorize', { ...page, mode: 'write', durationMs: 60000, takeover: false });
+    let release;
+    const stream = new ReadableStream({ start(controller) { release = () => {
+      controller.enqueue(new TextEncoder().encode(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
+        name: 'edit_canvas', arguments: { boardId: 'fictional', expectedRevision: 'a'.repeat(64), operations: [{ op: 'create_card', text: '旧请求' }] }
+      } })));
+      controller.close();
+    }; } });
+    const pending = bridge.fetch(new Request(`https://${hostname}/mcp`, {
+      method: 'POST', headers: { Host: hostname, Authorization: `Bearer ${paired.clientToken}`, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': '2025-11-25' },
+      body: stream, duplex: 'half'
+    }));
+    const renewed = (await paired.complete('authorize', { ...page, mode: 'write', durationMs: 60000, takeover: false })).value;
+    release();
+    const response = await pending;
+    assert.equal(response.status, 200);
+    const text = await response.text();
+    assert.match(text, /authorization_changed/u);
+    const queued = await bridge.fetch(new Request(`https://${hostname}/api/mcp/poll`, { headers: { ...headers, Authorization: `Bearer ${renewed.ownerToken}` } }));
+    assert.equal(queued.status, 204);
+  } finally { await bridge.close(); }
+});
+
+test('取消配对先立即撤销授权再等待持久化，并阻止并发证明在落盘期间重新授权', async (t) => {
+  const authority = createMemoryPairingAuthority();
+  let beginRevoke;
+  let finishRevoke;
+  const begun = new Promise(resolve => { beginRevoke = resolve; });
+  const gate = new Promise(resolve => { finishRevoke = resolve; });
+  const pairingAuthority = { ...authority, async revoke(pairingId) { beginRevoke(); await gate; return await authority.revoke(pairingId); } };
+  const { api, connect, poll } = await fixture(t, { pairingAuthority });
+  const paired = await pair(api);
+  const page = { pageId: randomUUID(), tabId: randomUUID() };
+  const grant = (await paired.complete('authorize', { ...page, mode: 'read', durationMs: 60000, takeover: false })).value;
+  const client = await connect(paired);
+  const reading = client.callTool({ name: 'get_canvas', arguments: {} });
+  await poll(grant.ownerToken);
+  const nextProof = await paired.proof('authorize', { ...page, mode: 'write', durationMs: 60000, takeover: false });
+  const unpairing = paired.complete('unpair', {});
+  await begun;
+  try {
+    assert.equal((await reading).structuredContent.code, 'disconnected');
+    assert.equal((await api('poll', { token: grant.ownerToken })).status, 401);
+    assert.equal((await api('pairing/complete', { body: nextProof })).value.code, 'pairing_revoking');
+    assert.equal((await client.callTool({ name: 'connection_status', arguments: {} })).structuredContent.connected, false);
+  } finally { finishRevoke(); }
+  assert.equal((await unpairing).status, 200);
+  await assert.rejects(() => client.listTools(), /unauthorized/u);
+});
+
+test('身份状态落盘后不确定时整个中继停止转发，其他配对的 owner 和等待请求也同步失效', async (t) => {
+  const authority = createMemoryPairingAuthority();
+  const pairingAuthority = { ...authority, async revoke() { throw Object.assign(new Error('Fictional directory sync failure'), { pairingStoreUncertain: true }); } };
+  const { api, connect, poll } = await fixture(t, { pairingAuthority });
+  const first = await pair(api);
+  const second = await pair(api);
+  const page = { pageId: randomUUID(), tabId: randomUUID() };
+  const grant = (await second.complete('authorize', { ...page, mode: 'read', durationMs: 60000, takeover: false })).value;
+  const client = await connect(second);
+  const reading = client.callTool({ name: 'get_canvas', arguments: {} });
+  await poll(grant.ownerToken);
+  assert.equal((await first.complete('unpair', {})).status, 500);
+  assert.equal((await reading).structuredContent.code, 'unavailable');
+  assert.equal((await api('poll', { token: grant.ownerToken })).status, 503);
+  assert.equal((await api('/health', { method: 'GET', browser: false })).status, 503);
 });

@@ -1,5 +1,5 @@
 [Unit]
-Description=Yuandian temporary single-canvas MCP relay
+Description=Yuandian paired MCP relay with temporary canvas grants
 After=network.target
 
 [Service]
@@ -12,6 +12,9 @@ Environment=NODE_ENV=production
 Environment=YUANDIAN_PUBLIC_URL=https://stellarcore.games/yuandian-mcp
 Environment=YUANDIAN_ALLOWED_ORIGIN=https://yitonghu-sc.github.io
 Environment=YUANDIAN_PORT=4177
+Environment=YUANDIAN_PAIRING_STORE=/var/lib/yuandian-mcp/pairings.json
+StateDirectory=yuandian-mcp
+StateDirectoryMode=0700
 Restart=on-failure
 RestartSec=3s
 TimeoutStopSec=10s

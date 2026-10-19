@@ -3,6 +3,7 @@ import { realpathSync } from 'node:fs';
 import { isIP } from 'node:net';
 import { Readable } from 'node:stream';
 import { createRemoteMcpBridge, remoteSettings } from './mcp-remote-bridge.mjs';
+import { loadPairingAuthority } from './mcp-pairing-store.mjs';
 
 function incomingBody(incoming) {
   let done = false;
@@ -56,7 +57,9 @@ async function drainRejectedBody(incoming, deadline) {
 }
 
 /** The only listener is loopback; a reverse proxy supplies HTTPS and strips its prefix. */
-export async function startRemoteMcpServer({ port = 4177, ...settings } = {}) {
+export async function startRemoteMcpServer({ port = 4177, pairingStorePath, ...settings } = {}) {
+  if (pairingStorePath && !settings.pairingAuthority)
+    settings.pairingAuthority = await loadPairingAuthority({ filePath: pairingStorePath, now: settings.now });
   const bridge = createRemoteMcpBridge(settings);
   const server = http.createServer({ maxHeaderSize: 16384 }, async (incoming, outgoing) => {
     const bodyDeadline = Date.now() + 15000;

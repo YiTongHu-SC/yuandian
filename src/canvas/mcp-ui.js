@@ -1,4 +1,12 @@
 import { codexMcpConfiguration, getMcpConnection } from './mcp-connection.js';
+import { createPairedMcpPanel } from './mcp-paired-ui.js';
+
+export function createMcpPanel(options) {
+  const connection = options.connection || getMcpConnection(window.location);
+  return connection.remote && options.pairing !== false
+    ? createPairedMcpPanel({ ...options, connection })
+    : createLegacyMcpPanel({ ...options, connection });
+}
 
 function element(tag, attributes = {}, text = '') {
   const node = document.createElement(tag);
@@ -18,7 +26,7 @@ function action(text, callback, className = '') {
 
 // Session credentials live only in this closure and its visible configuration.
 // They never become part of a board, browser storage or an exported backup.
-export function createMcpPanel({
+function createLegacyMcpPanel({
   listCanvases,
   readCanvas,
   editCanvas,
