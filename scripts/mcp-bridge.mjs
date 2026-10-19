@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { inspectMcpCall, inspectMcpGrant, inspectMcpResult } from './mcp-access.mjs';
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const object = (value) =>
@@ -142,24 +143,18 @@ export function createMcpBridge({
     try {
       if (route === '/api/mcp/session') {
         const input = await readJson(request);
-        if (
-          !exactKeys(input, ['boardId', 'mode']) ||
-          typeof input.boardId !== 'string' ||
-          !input.boardId.length ||
-          input.boardId.length > 100 ||
-          !['read', 'write'].includes(input.mode)
-        ) {
+        const grant = inspectMcpGrant(input);
+        if (!grant) {
           return deny(
             400,
             'invalid_session',
-            '请选择单张画布与读取或编辑权限。'
+            '请选择有效的页面授权范围与读取或编辑权限。'
           );
         }
         if (sessions.size >= 16)
           return deny(429, 'session_limit', '连接过多，请先断开不用的连接。');
         const session = {
-          boardId: input.boardId,
-          mode: input.mode,
+          ...grant,
           ownerToken: randomBytes(32).toString('hex'),
           clientToken: randomBytes(32).toString('hex'),
           expiresAt: now() + sessionTtlMs,
@@ -172,7 +167,9 @@ export function createMcpBridge({
         return reply(201, {
           ownerToken: session.ownerToken,
           clientToken: session.clientToken,
+          scope: session.scope,
           boardId: session.boardId,
+          pageId: session.pageId,
           mode: session.mode,
           expiresAt: session.expiresAt,
           config: {
@@ -238,34 +235,29 @@ export function createMcpBridge({
         const item = session.pending.get(input.requestId);
         if (!item || !item.delivered)
           return deny(404, 'request_finished', '请求已结束或不属于此连接。');
+        const resultError = inspectMcpResult(session, item, input.result);
+        if (resultError) return reply(resultError.status, resultError.value);
         settle(session, item, input.result);
         return reply(200, { ok: true });
       }
       if (
         !exactKeys(input, ['tool', 'arguments']) ||
-        !['get_canvas', 'edit_canvas', 'connection_status'].includes(
-          input.tool
-        ) ||
         !object(input.arguments)
       )
         return deny(400, 'invalid_tool', '无效的工具调用。');
-      if (input.tool !== 'edit_canvas' && Object.keys(input.arguments).length)
-        return deny(400, 'invalid_arguments', '此工具不接受参数。');
+      const callError = inspectMcpCall(session, input.tool, input.arguments);
+      if (callError) return reply(callError.status, callError.value);
       if (input.tool === 'connection_status')
         return reply(200, {
           ok: true,
           connected: true,
+          scope: session.scope,
           boardId: session.boardId,
+          pageId: session.pageId,
           mode: session.mode,
           expiresAt: session.expiresAt,
           heartbeatAt: session.heartbeat
         });
-      if (input.tool === 'edit_canvas' && session.mode !== 'write')
-        return deny(
-          403,
-          'read_only',
-          '当前连接只允许读取，编辑需在原点重新授权。'
-        );
       if (session.pending.size >= maxPending)
         return deny(
           429,

@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { createRemoteMcpBridge, remoteSettings } from '../../scripts/mcp-remote-bridge.mjs';
 import { startRemoteMcpServer } from '../../scripts/mcp-remote-server.mjs';
+import { LIMITS, connect, createBoard, createNode, createWorkspace, exportJSON, parseImport } from '../../src/canvas/model.js';
 
 const publicUrl = 'https://relay.example/yuandian-mcp';
 const allowedOrigin = 'https://yitonghu-sc.github.io';
@@ -200,11 +201,11 @@ test('授权默认只读并绑定单页单画布，返回独立临时客户端�
   ]) assert.equal((await api('session', { body })).status, 400);
 });
 
-test('真实 SDK Streamable HTTP 三工具、读取、默认只读拒写与单画布响应校验', { timeout: 15000 }, async (t) => {
+test('真实 SDK Streamable HTTP 六工具、读取、默认只读拒写与单画布响应校验', { timeout: 15000 }, async (t) => {
   const { api, authorize, connect, poll } = await fixture(t);
   const session = await authorize();
   const client = await connect(session);
-  assert.deepEqual((await client.listTools()).tools.map((tool) => tool.name), ['get_canvas', 'edit_canvas', 'connection_status']);
+  assert.deepEqual((await client.listTools()).tools.map((tool) => tool.name), ['get_canvas', 'edit_canvas', 'connection_status', 'list_canvases', 'create_canvas', 'export_canvas']);
   const status = await client.callTool({ name: 'connection_status', arguments: {} });
   assert.equal(status.structuredContent.mode, 'read');
   assert.equal(status.structuredContent.pageId, session.pageId);
@@ -334,7 +335,7 @@ test('旧版 initialize / tools/list 可通过官方 stateless fallback 接入�
   const listed = await api('/mcp', { token: session.clientToken, browser: false, headers: { ...headers, 'MCP-Protocol-Version': '2025-11-25' }, body: {
     jsonrpc: '2.0', id: 2, method: 'tools/list', params: {}
   } });
-  assert.equal(listed.value.result.tools.length, 3);
+  assert.equal(listed.value.result.tools.length, 6);
   assert.equal((await api('/mcp', { browser: false, headers, body: { jsonrpc: '2.0', id: 3, method: 'tools/list' } })).status, 401);
 });
 
@@ -470,4 +471,106 @@ test('慢结果正文受全局内存预算限制，中止流后释放预算', as
   // A missing request is a normal 404, proving a freed body budget can be read again.
   assert.equal((await bridge.fetch(validShape())).status, 404);
   await bridge.close();
+});
+
+test('真实 HTTP SDK workspace 授权默认只读，旧单画布令牌不会获得新范围', async (t) => {
+  const { api, authorize, connect, poll } = await fixture(t);
+  const pageId = randomUUID();
+  const created = await api('session', { body: { scope: 'workspace', pageId } });
+  assert.equal(created.status, 201);
+  const session = created.value;
+  assert.equal(session.scope, 'workspace');
+  assert.equal(session.mode, 'read');
+  assert.equal('boardId' in session, false);
+  const client = await connect(session);
+  const status = (await client.callTool({ name: 'connection_status', arguments: {} })).structuredContent;
+  assert.equal(status.scope, 'workspace');
+  assert.equal(status.pageId, pageId);
+  for (const [name, arguments_] of [
+    ['edit_canvas', { boardId: 'first', expectedRevision: 'a'.repeat(64), operations: [{ op: 'create_card', text: '拒写' }] }],
+    ['create_canvas', { expectedWorkspaceRevision: 'b'.repeat(64) }]
+  ]) assert.equal((await client.callTool({ name, arguments: arguments_ })).structuredContent.code, 'read_only');
+  const pending = client.callTool({ name: 'export_canvas', arguments: { all: true } });
+  const request = (await poll(session.ownerToken)).value;
+  const result = { ok: true, json: JSON.stringify({ version: 1, activeId: 'first', boards: [{ id: 'first' }, { id: 'second' }] }), filename: '全部画布.json', mimeType: 'application/json' };
+  await api('result', { token: session.ownerToken, body: { requestId: request.requestId, result } });
+  assert.deepEqual((await pending).structuredContent, result);
+  const old = await authorize('write');
+  const oldClient = await connect(old);
+  assert.equal((await oldClient.callTool({ name: 'connection_status', arguments: {} })).structuredContent.scope, 'canvas');
+  for (const [name, arguments_] of [['list_canvases', {}], ['create_canvas', { expectedWorkspaceRevision: 'a'.repeat(64) }], ['export_canvas', { all: true }]])
+    assert.equal((await oldClient.callTool({ name, arguments: arguments_ })).structuredContent.code, 'scope_mismatch');
+  const invalid = await api('session', { body: { scope: 'workspace', pageId, boardId: 'first' } });
+  assert.equal(invalid.status, 400);
+});
+
+test('真实 HTTP SDK 同一 workspace 会话跨画布读写、新建和导出，显式目标响应不能错配', async (t) => {
+  const { api, connect, poll } = await fixture(t);
+  const session = (await api('session', { body: { scope: 'workspace', pageId: randomUUID(), mode: 'write' } })).value;
+  const client = await connect(session);
+  assert.equal((await client.callTool({ name: 'edit_canvas', arguments: { expectedRevision: 'a'.repeat(64), operations: [{ op: 'create_card' }] } })).structuredContent.code, 'invalid_arguments');
+  const jobs = [
+    ['list_canvases', {}, { ok: true, activeId: 'first', workspaceRevision: 'a'.repeat(64), boards: [{ id: 'first', title: '第一张' }, { id: 'second', title: '第二张' }] }],
+    ['get_canvas', { boardId: 'second' }, { ok: true, board: { id: 'second', nodes: [], edges: [] }, revision: 'b'.repeat(64) }],
+    ['edit_canvas', { boardId: 'first', expectedRevision: 'a'.repeat(64), operations: [{ op: 'create_card', text: '跨画布虚构编辑' }] }, { ok: true, revision: 'c'.repeat(64) }],
+    ['create_canvas', { title: '新建画布', expectedWorkspaceRevision: 'a'.repeat(64) }, { ok: true, board: { id: 'third' }, revision: 'd'.repeat(64), workspaceRevision: 'e'.repeat(64) }],
+    ['export_canvas', { boardId: 'third' }, { ok: true, json: JSON.stringify({ version: 1, activeId: 'third', boards: [{ id: 'third' }] }), filename: '新建画布.json', mimeType: 'application/json' }]
+  ];
+  for (const [name, arguments_, result] of jobs) {
+    const pending = client.callTool({ name, arguments: arguments_ });
+    const request = (await poll(session.ownerToken)).value;
+    assert.equal(request.tool, name);
+    assert.deepEqual(request.arguments, arguments_);
+    if (name === 'get_canvas')
+      assert.equal((await api('result', { token: session.ownerToken, body: { requestId: request.requestId, result: { ...result, board: { id: 'first' } } } })).value.code, 'scope_mismatch');
+    assert.equal((await api('result', { token: session.ownerToken, body: { requestId: request.requestId, result } })).status, 200);
+    assert.deepEqual((await pending).structuredContent, result);
+  }
+  await api('disconnect', { token: session.ownerToken, body: {} });
+  await assert.rejects(() => client.callTool({ name: 'list_canvases', arguments: {} }), /unauthorized/u);
+});
+
+test('接近二百万字符的有效中文 v1 全部导出经真实 HTTP SDK 完整传输并回导', { timeout: 15000 }, async (t) => {
+  const { api, connect: connectClient, poll } = await fixture(t);
+  const workspace = createWorkspace();
+  workspace.boards.push(createBoard('中文导出第二张画布'));
+  for (const board of workspace.boards) {
+    board.nodes = Array.from({ length: 100 }, (_, index) =>
+      createNode(`第${index + 1}张卡片\n"引号"\\尾行${'思'.repeat(9780)}`, index * 10, index * 5));
+    for (let index = 1; index < 10; index++) connect(board, board.nodes[index - 1].id, board.nodes[index].id);
+  }
+  const targetLength = LIMITS.chars - 128;
+  let remaining = targetLength - exportJSON(workspace).length;
+  assert.ok(remaining > 0);
+  for (const node of workspace.boards.flatMap((board) => board.nodes)) {
+    const added = Math.min(remaining, LIMITS.text - node.text.length);
+    node.text += '生'.repeat(added);
+    remaining -= added;
+    if (!remaining) break;
+  }
+  assert.equal(remaining, 0);
+  const json = exportJSON(workspace);
+  assert.equal(json.length, targetLength);
+  assert.equal(parseImport(json).ok, true);
+  const result = { ok: true, json, filename: '原点全部画布.json', mimeType: 'application/json' };
+  const sampleBody = JSON.stringify({ requestId: randomUUID(), result });
+  assert.ok(Buffer.byteLength(sampleBody) > 5.6 * 1024 * 1024, '中文正文确实超过 5.6 MiB');
+  assert.ok(Buffer.byteLength(sampleBody) < 8 * 1024 * 1024, '包括嵌套 JSON 转义后仍在现有 8 MiB 限额内');
+  const session = (await api('session', { body: { scope: 'workspace', pageId: randomUUID() } })).value;
+  const client = await connectClient(session);
+  const pending = client.callTool({ name: 'export_canvas', arguments: { all: true } });
+  const request = (await poll(session.ownerToken)).value;
+  assert.equal(request.tool, 'export_canvas');
+  const body = JSON.stringify({ requestId: request.requestId, result });
+  const acknowledged = await api('result', { token: session.ownerToken, rawBody: body });
+  assert.equal(acknowledged.status, 200);
+  const received = await pending;
+  assert.equal(received.isError, undefined);
+  assert.equal(received.structuredContent.json, json);
+  const imported = parseImport(received.structuredContent.json);
+  assert.equal(imported.ok, true);
+  assert.deepEqual(imported.value, workspace);
+  // MCP carries both structured content and a text representation; neither is truncated by the transport.
+  const textCopy = JSON.parse(received.content[0].text.slice(received.content[0].text.indexOf('\n') + 1));
+  assert.equal(textCopy.json, json);
 });

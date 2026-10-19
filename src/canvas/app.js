@@ -15,7 +15,14 @@ import {
   exportJSON
 } from './model.js';
 import { createHistory, snapshotBoard } from './history.js';
-import { revisionOf, applyMcpEdits } from './mcp-model.js';
+import { revisionOf } from './mcp-model.js';
+import {
+  listMcpCanvases,
+  getMcpCanvas,
+  applyMcpWorkspaceEdits,
+  createMcpCanvas,
+  exportMcpCanvas
+} from './mcp-workspace-model.js';
 import { createMcpPanel } from './mcp-ui.js';
 import { getMcpConnection } from './mcp-connection.js';
 import {
@@ -202,59 +209,69 @@ function mcpWriteBlock() {
     return '画布正在编辑或保存，请完成操作后重新读取并重试。';
   return '';
 }
-async function readMcpCanvas() {
-  const current = copy(board());
-  return { ok: true, board: current, revision: await revisionOf(current) };
-}
-async function editMcpCanvas(args, { isAuthorized } = {}) {
-  const authorized = () => typeof isAuthorized === 'function' && isAuthorized();
-  const revoked = () => ({
+function mcpRevoked() {
+  return {
     ok: false,
     code: 'authorization_revoked',
-    error: '本次 AI 接入已断开，修改未应用。'
-  });
+    error: '本次 AI 接入已断开，操作未应用。'
+  };
+}
+async function readMcpWorkspace(operation, args, { isAuthorized } = {}) {
+  if (!isAuthorized?.()) return mcpRevoked();
+  const result = await operation(copy(workspace), args);
+  if (!isAuthorized()) return mcpRevoked();
+  const unavailable = canConnectMcp();
+  return unavailable === true
+    ? result
+    : { ok: false, code: 'canvas_unavailable', error: unavailable };
+}
+const listMcpWorkspace = (args, context) =>
+  readMcpWorkspace(listMcpCanvases, args, context);
+const readMcpCanvas = (args, context) =>
+  readMcpWorkspace(getMcpCanvas, args, context);
+const exportMcpData = (args, context) =>
+  readMcpWorkspace(exportMcpCanvas, args, context);
+
+function acceptMcpSave(next) {
+  const saved = save(storage, next, savedRaw);
+  if (!saved.ok) {
+    if (saved.status === 'conflict') {
+      conflict = true;
+      showRecovery();
+    } else saveError = saved.error || '保存失败，AI 修改未应用。';
+    status();
+    return { ok: false, code: saved.status, error: saved.error };
+  }
+  workspace = next;
+  savedRaw = saved.raw;
+  dirty = false;
+  saveError = '';
+  return { ok: true };
+}
+
+async function writeMcpWorkspace(args, { isAuthorized } = {}, operation, applied) {
+  const authorized = () => typeof isAuthorized === 'function' && isAuthorized();
   const commit = async () => {
-    if (!authorized()) return revoked();
+    if (!authorized()) return mcpRevoked();
     const blocked = mcpWriteBlock();
     if (blocked) return { ok: false, code: 'canvas_busy', error: blocked };
-    const original = JSON.stringify(workspace),
-      current = board(),
-      before = snapshotBoard(current),
-      result = await applyMcpEdits(copy(current), args);
-    if (!authorized()) return revoked();
+    const before = copy(workspace);
+    const original = JSON.stringify(workspace);
+    const result = await operation(copy(workspace), args);
+    if (!authorized()) return mcpRevoked();
     if (!result.ok) return result;
     // Hashing is asynchronous: recheck local edits and cross-page state before saving.
     if (mcpWriteBlock() || JSON.stringify(workspace) !== original)
       return {
         ok: false,
         code: 'revision_conflict',
-        error: '画布已经变化，请重新读取后再编辑。'
+        error: '工作区已经变化，请重新读取后再操作。'
       };
-    const next = copy(workspace);
-    next.boards[next.boards.findIndex((b) => b.id === current.id)] =
-      result.board;
-    const saved = save(storage, next, savedRaw);
-    if (!saved.ok) {
-      if (saved.status === 'conflict') {
-        conflict = true;
-        showRecovery();
-      } else saveError = saved.error || '保存失败，AI 修改未应用。';
-      status();
-      return { ok: false, code: saved.status, error: saved.error };
-    }
-    workspace = next;
-    savedRaw = saved.raw;
-    dirty = false;
-    saveError = '';
-    histories.record(board(), before);
-    selection = null;
-    closeMenus();
-    cancelConnect();
-    updateBoardMenu();
-    renderBoard();
+    const saved = acceptMcpSave(result.workspace);
+    if (!saved.ok) return saved;
+    const output = applied(result, before);
     status();
-    note('AI 已更新画布，可撤销。');
-    return { ok: true, revision: result.revision, created: result.created };
+    return output;
   };
   try {
     return await (navigator.locks?.request
@@ -264,8 +281,70 @@ async function editMcpCanvas(args, { isAuthorized } = {}) {
     return {
       ok: false,
       code: 'operation_failed',
-      error: 'AI 修改未完成，请重新读取画布后重试。'
+      error: 'AI 操作未完成，请重新读取后重试。'
     };
+  }
+}
+function editMcpCanvas(args, context) {
+  return writeMcpWorkspace(args, context, applyMcpWorkspaceEdits, (result, before) => {
+    const target = workspace.boards.find((item) => item.id === result.boardId);
+    const previous = before.boards.find((item) => item.id === result.boardId);
+    histories.record(target, snapshotBoard(previous));
+    updateBoardMenu();
+    if (workspace.activeId === target.id) {
+      selection = null;
+      closeMenus();
+      cancelConnect();
+      renderBoard();
+    } else updateTools();
+    note(`AI 已更新“${target.title || '未命名画布'}”，可在该画布撤销。`);
+    return { ok: true, boardId: target.id, revision: result.revision, created: result.created };
+  });
+}
+function createMcpBoard(args, context) {
+  return writeMcpWorkspace(args, context, createMcpCanvas, (result) => {
+    updateBoardMenu();
+    updateTools();
+    note(`AI 已新增画布“${result.board.title || '未命名画布'}”。`,
+      () => void undoMcpCreation(result.board.id, result.revision));
+    return {
+      ok: true,
+      board: result.board,
+      revision: result.revision,
+      workspaceRevision: result.workspaceRevision
+    };
+  });
+}
+async function undoMcpCreation(boardId, createdRevision) {
+  const commit = async () => {
+    const blocked = mcpWriteBlock();
+    if (blocked) return note(blocked);
+    const original = JSON.stringify(workspace);
+    const target = workspace.boards.find((item) => item.id === boardId);
+    if (!target) return note('这张画布已不存在。');
+    if (await revisionOf(target) !== createdRevision)
+      return note('新增画布已有内容改动，请通过画布菜单处理。');
+    if (mcpWriteBlock() || JSON.stringify(workspace) !== original)
+      return note('工作区正在变化，请完成操作后重试。');
+    const next = copy(workspace);
+    next.boards = next.boards.filter((item) => item.id !== boardId);
+    if (!next.boards.length) return note('当前只剩这张画布，无法撤销新增。');
+    const wasActive = next.activeId === boardId;
+    if (wasActive) next.activeId = next.boards[0].id;
+    const saved = acceptMcpSave(next);
+    if (!saved.ok) return note(saved.error || '撤销未保存，请重试。');
+    updateBoardMenu();
+    if (wasActive) {
+      selection = null;
+      renderBoard();
+    } else updateTools();
+    status();
+    note('已撤销 AI 新增的画布。');
+  };
+  try {
+    await (navigator.locks?.request ? navigator.locks.request(CANVAS_KEY, commit) : commit());
+  } catch {
+    note('撤销未完成，请先备份数据。');
   }
 }
 function toggleMcpPanel() {
@@ -488,8 +567,6 @@ function build() {
   showRecovery();
 }
 function renderBoard() {
-  if (mcpPanel?.boardId && mcpPanel.boardId !== board()?.id)
-    mcpPanel.disconnect('已切换画布，接入已断开');
   editing = null;
   nodeEls = new Map();
   nodesLayer.replaceChildren();
@@ -1483,7 +1560,7 @@ function showRecovery() {
   el.replaceChildren();
   if (!corrupt && !conflict) return;
   mcpPanel?.close();
-  if (mcpPanel?.boardId)
+  if (mcpPanel?.authorized)
     void mcpPanel.disconnect('保存已暂停，AI 接入已断开。');
   el.append(
     h(
@@ -1649,9 +1726,11 @@ if (!workspace.boards.length) workspace = createWorkspace();
 build();
 mcpPanel = createMcpPanel({
   connection: mcpConnection,
-  getCanvas: board,
+  listCanvases: listMcpWorkspace,
   readCanvas: readMcpCanvas,
   editCanvas: editMcpCanvas,
+  createCanvas: createMcpBoard,
+  exportCanvas: exportMcpData,
   canConnect: canConnectMcp
 });
 new ResizeObserver(positionTools).observe(stage);

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import test from 'node:test';
 import { Client } from '@modelcontextprotocol/client';
@@ -77,9 +78,11 @@ test(
       }
       assert.fail('SDK tool call was not relayed');
     }
-    async function connect(mode) {
+    async function connect(mode, workspace = false) {
       const session = (
-        await browser('session', null, { boardId: 'fictional-board', mode })
+        await browser('session', null, workspace
+          ? { scope: 'workspace', pageId: randomUUID(), mode }
+          : { boardId: 'fictional-board', mode })
       ).value;
       const transport = new StdioClientTransport({
         ...session.config,
@@ -101,7 +104,7 @@ test(
     const tools = (await client.listTools()).tools;
     assert.deepEqual(
       tools.map((tool) => tool.name),
-      ['get_canvas', 'edit_canvas', 'connection_status']
+      ['get_canvas', 'edit_canvas', 'connection_status', 'list_canvases', 'create_canvas', 'export_canvas']
     );
     assert.equal(tools[0].annotations.readOnlyHint, true);
     assert.equal(tools[1].inputSchema.additionalProperties, false);
@@ -187,5 +190,25 @@ test(
     assert.equal(disconnected.structuredContent.code, 'unauthorized');
     assert.equal(stderr(), '');
     assert.equal(readOnly.stderr(), '');
+    const workspace = await connect('write', true);
+    assert.equal((await workspace.client.callTool({ name: 'connection_status', arguments: {} })).structuredContent.scope, 'workspace');
+    const jobs = [
+      ['list_canvases', {}, { ok: true, activeId: 'first', workspaceRevision: 'a'.repeat(64), boards: [{ id: 'first' }, { id: 'second' }] }],
+      ['get_canvas', { boardId: 'second' }, { ok: true, board: { id: 'second' }, revision: 'b'.repeat(64) }],
+      ['edit_canvas', { boardId: 'second', expectedRevision: 'b'.repeat(64), operations: [{ op: 'create_card', text: '另一画布' }] }, { ok: true, revision: 'c'.repeat(64) }],
+      ['create_canvas', { title: '新建测试', expectedWorkspaceRevision: 'a'.repeat(64) }, { ok: true, board: { id: 'third' }, revision: 'd'.repeat(64), workspaceRevision: 'e'.repeat(64) }],
+      ['export_canvas', { all: true }, { ok: true, json: JSON.stringify({ version: 1, activeId: 'first', boards: [{ id: 'first' }, { id: 'second' }, { id: 'third' }] }), filename: '备份.json', mimeType: 'application/json' }]
+    ];
+    for (const [name, arguments_, result] of jobs) {
+      const pending = workspace.client.callTool({ name, arguments: arguments_ });
+      const request = await poll(workspace.session.ownerToken);
+      assert.equal(request.tool, name);
+      assert.deepEqual(request.arguments, arguments_);
+      await browser('result', workspace.session.ownerToken, { requestId: request.requestId, result });
+      assert.deepEqual((await pending).structuredContent, result);
+    }
+    const invalidTarget = await workspace.client.callTool({ name: 'edit_canvas', arguments: { expectedRevision: 'b'.repeat(64), operations: [{ op: 'create_card' }] } });
+    assert.equal(invalidTarget.structuredContent.code, 'invalid_arguments');
+    assert.equal(workspace.stderr(), '');
   }
 );

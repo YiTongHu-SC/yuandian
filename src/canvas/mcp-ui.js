@@ -19,9 +19,11 @@ function action(text, callback, className = '') {
 // Session credentials live only in this closure and its visible configuration.
 // They never become part of a board, browser storage or an exported backup.
 export function createMcpPanel({
-  getCanvas,
+  listCanvases,
   readCanvas,
   editCanvas,
+  createCanvas,
+  exportCanvas,
   canConnect,
   connection = getMcpConnection(window.location)
 }) {
@@ -40,7 +42,7 @@ export function createMcpPanel({
   const description = element(
     'p',
     { class: 'mcp-description' },
-    '让 AI 通过 MCP 查看或编辑这张画布。'
+    '让 AI 通过 MCP 查看、编辑和导出画布。'
   );
   const scope = element('p', { class: 'mcp-scope' });
   const modeLabel = element('label', { class: 'mcp-permission' }, '允许 AI');
@@ -57,8 +59,8 @@ export function createMcpPanel({
     'p',
     { class: 'mcp-notice' },
     connection.remote
-      ? '仅临时授权此画布，默认只读。内容经临时中继发送给 AI，持久数据仍在当前浏览器。AI 的修改可以撤销。'
-      : '仅授权此画布，切换画布会断开。AI 的修改可以撤销。'
+      ? '临时授权当前浏览器、当前站点的全部画布，默认只读。切换或新增画布后继续有效。内容经临时中继发送给 AI，持久数据仍在当前浏览器。AI 的修改可以撤销。'
+      : '临时授权当前浏览器、当前站点的全部画布，默认只读。切换或新增画布后继续有效。AI 的修改可以撤销。'
   );
   const status = element('p', {
     class: 'mcp-status',
@@ -80,8 +82,8 @@ export function createMcpPanel({
     'p',
     {},
     connection.remote
-      ? '将此段添加或替换到 Codex 的 config.toml 中的 yuandian 服务，保留其他服务，再重新加载 MCP。配置最长有效 1 小时，需保持本页打开；切换、刷新或断开后失效。'
-      : '将配置添加到支持 MCP 的 AI 客户端。仅在本页保持打开时有效，断开后失效。'
+      ? '将此段添加或替换到 Codex 的 config.toml 中的 yuandian 服务，保留其他服务，再重新加载 MCP。配置最长有效 1 小时，需保持本页打开；刷新、关闭或断开后失效。'
+      : '将配置添加到支持 MCP 的 AI 客户端。配置最长有效 1 小时，需保持本页打开；刷新、关闭或断开后失效。'
   );
   const configText = element('textarea', {
     class: 'mcp-config-text',
@@ -117,20 +119,25 @@ export function createMcpPanel({
 
   let session = null;
   let starting = false;
-  let startingBoardId = null;
   let generation = 0;
   let pollTimer;
   let expiryTimer;
   let failedPolls = 0;
-  const pageId = connection.remote ? crypto.randomUUID() : null;
+  const pageId = connection.available ? crypto.randomUUID() : null;
   const requests = new Set();
   const completedRequests = new Map();
   let message = '尚未开启接入';
   let isError = false;
+  const handlers = {
+    list_canvases: listCanvases,
+    get_canvas: readCanvas,
+    edit_canvas: editCanvas,
+    create_canvas: createCanvas,
+    export_canvas: exportCanvas
+  };
 
   function update() {
-    const current = getCanvas();
-    scope.textContent = `当前画布：${current?.title || '未命名画布'}`;
+    scope.textContent = '授权范围：当前浏览器、当前站点的全部画布';
     mode.disabled = starting || Boolean(session);
     connectButton.disabled = starting;
     connectButton.hidden = Boolean(session);
@@ -236,36 +243,32 @@ export function createMcpPanel({
     if (starting || session) return;
     const reason = allowed();
     if (reason) return feedback(reason, true);
-    const current = getCanvas();
-    if (!current?.id) return feedback('请先打开一张画布。', true);
     const focusStartedOnConnect = document.activeElement === connectButton;
     const ticket = ++generation;
-    const boardId = current.id;
     const permission = mode.value;
     starting = true;
-    startingBoardId = boardId;
     feedback('正在开启接入…');
     try {
       const opened = await request('session', {
         body: {
-          boardId,
-          mode: permission,
-          ...(connection.remote ? { pageId } : {})
+          scope: 'workspace',
+          pageId,
+          mode: permission
         }
       });
-      if (ticket !== generation || getCanvas()?.id !== boardId || allowed()) {
+      if (ticket !== generation || allowed()) {
         if (opened?.ownerToken) await revoke(opened.ownerToken);
         if (ticket === generation)
-          feedback('画布状态已改变，请重新开启接入。', true);
+          feedback('当前无法接入，请处理保存状态后重新开启。', true);
         return;
       }
       if (
         !opened?.ownerToken ||
         !opened?.clientToken ||
         !opened?.config ||
-        opened.boardId !== boardId ||
+        opened.scope !== 'workspace' ||
         opened.mode !== permission ||
-        (connection.remote && opened.pageId !== pageId) ||
+        opened.pageId !== pageId ||
         !Number.isFinite(opened.expiresAt) ||
         opened.expiresAt <= Date.now()
       ) {
@@ -288,7 +291,8 @@ export function createMcpPanel({
       }
       session = {
         ownerToken: opened.ownerToken,
-        boardId,
+        scope: 'workspace',
+        pageId,
         mode: permission,
         expiresAt: Math.min(opened.expiresAt, Date.now() + 3600000)
       };
@@ -321,7 +325,6 @@ export function createMcpPanel({
     } finally {
       if (ticket === generation) {
         starting = false;
-        startingBoardId = null;
         update();
       }
     }
@@ -341,10 +344,6 @@ export function createMcpPanel({
       await disconnect('接入已过期，请重新开启。');
       return;
     }
-    if (getCanvas()?.id !== active.boardId) {
-      await disconnect('已切换画布，接入已断开。');
-      return;
-    }
     const reason = allowed();
     if (reason) {
       await disconnect(`${reason}，接入已断开。`);
@@ -356,13 +355,14 @@ export function createMcpPanel({
       const recovered = failedPolls > 0;
       if (pending) {
         let result = completedRequests.get(pending.requestId);
-        if (getCanvas()?.id !== active.boardId) {
-          await disconnect('已切换画布，接入已断开。');
-          return;
-        }
         if (!result) {
           try {
             const refusal = allowed();
+            const writes =
+              pending.tool === 'edit_canvas' || pending.tool === 'create_canvas';
+            const handler = Object.hasOwn(handlers, pending.tool)
+              ? handlers[pending.tool]
+              : null;
             if (
               !Number.isFinite(pending.expiresAt) ||
               Date.now() >= pending.expiresAt
@@ -374,27 +374,24 @@ export function createMcpPanel({
               };
             else if (refusal)
               result = { ok: false, code: 'UNAVAILABLE', error: refusal };
-            else if (pending.tool === 'get_canvas') result = await readCanvas();
-            else if (
-              pending.tool === 'edit_canvas' &&
-              active.mode === 'write'
-            ) {
-              result = await editCanvas(pending.arguments, {
-                isAuthorized: () =>
-                  ticket === generation &&
-                  session === active &&
-                  active.mode === 'write' &&
-                  Date.now() < active.expiresAt &&
-                  typeof pending.expiresAt === 'number' &&
-                  Date.now() < pending.expiresAt &&
-                  getCanvas()?.id === active.boardId
-              });
-            } else if (pending.tool === 'edit_canvas') {
+            else if (writes && active.mode !== 'write') {
               result = {
                 ok: false,
                 code: 'READ_ONLY',
-                error: '本次接入仅允许读取画布。'
+                error: '本次接入仅允许读取和导出画布。'
               };
+            } else if (typeof handler === 'function') {
+              result = await handler(pending.arguments, {
+                isAuthorized: () =>
+                  ticket === generation &&
+                  session === active &&
+                  active.scope === 'workspace' &&
+                  active.pageId === pageId &&
+                  (!writes || active.mode === 'write') &&
+                  Date.now() < active.expiresAt &&
+                  Number.isFinite(pending.expiresAt) &&
+                  Date.now() < pending.expiresAt
+              });
             } else {
               result = {
                 ok: false,
@@ -410,10 +407,6 @@ export function createMcpPanel({
             };
           }
           if (ticket !== generation || session !== active) return;
-          if (getCanvas()?.id !== active.boardId) {
-            await disconnect('已切换画布，接入已断开。');
-            return;
-          }
           if (Date.now() >= active.expiresAt) {
             await disconnect('接入已过期，请重新开启。');
             return;
@@ -432,10 +425,6 @@ export function createMcpPanel({
           }
         }
         if (ticket !== generation || session !== active) return;
-        if (getCanvas()?.id !== active.boardId) {
-          await disconnect('已切换画布，接入已断开。');
-          return;
-        }
         if (Date.now() >= active.expiresAt) {
           await disconnect('接入已过期，请重新开启。');
           return;
@@ -487,7 +476,6 @@ export function createMcpPanel({
     for (const controller of requests) controller.abort();
     session = null;
     starting = false;
-    startingBoardId = null;
     mode.value = 'read';
     failedPolls = 0;
     completedRequests.clear();
@@ -535,8 +523,8 @@ export function createMcpPanel({
     toggle,
     close,
     disconnect,
-    get boardId() {
-      return session?.boardId || startingBoardId;
+    get authorized() {
+      return starting || Boolean(session);
     },
     get connected() {
       return Boolean(session);

@@ -58,7 +58,7 @@ async function until(predicate) {
   assert.fail('异步面板操作没有在预期时间内完成。');
 }
 
-function fixture(t, { handle, readCanvas, editCanvas, clipboard } = {}) {
+function fixture(t, { handle, listCanvases, readCanvas, editCanvas, createCanvas, exportCanvas, clipboard, remote = true } = {}) {
   const originals = new Map();
   const nodes = [];
   const document = {
@@ -86,7 +86,7 @@ function fixture(t, { handle, readCanvas, editCanvas, clipboard } = {}) {
   const opened = () => ({
     ownerToken,
     clientToken,
-    boardId: current.id,
+    scope: 'workspace',
     mode: document.querySelector('#mcp-permission').value,
     pageId,
     expiresAt: Date.now() + 60000,
@@ -115,11 +115,14 @@ function fixture(t, { handle, readCanvas, editCanvas, clipboard } = {}) {
   const panel = createMcpPanel({
     getCanvas: () => current,
     canConnect: () => true,
+    listCanvases: listCanvases || (async () => ({ ok: true, activeId: current.id, boards: [current] })),
     readCanvas: readCanvas || (async () => ({ ok: true, board: current })),
     editCanvas: editCanvas || (async () => ({ ok: true })),
+    createCanvas: createCanvas || (async () => ({ ok: true })),
+    exportCanvas: exportCanvas || (async () => ({ ok: true, json: '{}' })),
     connection: {
       available: true,
-      remote: true,
+      remote,
       apiBase: 'https://stellarcore.games/yuandian-mcp/api/mcp',
       pollDelayMs: 0,
       requestTimeoutMs: 35000
@@ -144,7 +147,7 @@ function fixture(t, { handle, readCanvas, editCanvas, clipboard } = {}) {
   };
 }
 
-test('尚在开启时切换画布会撤销，迟到的授权响应不能在切回后复活', async t => {
+test('开启一次授权全部画布，开启途中切换画布也不撤销', async t => {
   const response = deferred();
   let opened;
   const f = fixture(t, { handle: request => {
@@ -155,18 +158,40 @@ test('尚在开启时切换画布会撤销，迟到的授权响应不能在切�
   } });
   f.document.querySelector('#mcp-permission').value = 'write';
   const start = f.button('开启接入').emit('click');
-  assert.equal(f.panel.boardId, 'board-a');
+  assert.equal(f.panel.authorized, true);
   f.changeBoard('board-b');
-  await f.panel.disconnect('已切换画布');
-  f.changeBoard('board-a');
   response.resolve(json(opened));
   await start;
+  assert.equal(f.panel.connected, true);
+  assert.notEqual(f.config.value, '');
+  assert.equal(f.calls.filter(call => call.route === 'disconnect').length, 0);
+  const body = f.calls.find(call => call.route === 'session').body;
+  assert.deepEqual(Object.keys(body).sort(), ['mode', 'pageId', 'scope']);
+  assert.equal(body.scope, 'workspace');
+  assert.match(body.pageId, /^[a-f0-9-]{36}$/u);
+  assert.equal(f.document.querySelector('.mcp-scope').textContent, '授权范围：当前浏览器、当前站点的全部画布');
+});
+
+test('本机同样绑定页面实例，主动撤销后迟到授权不能复活', async t => {
+  const response = deferred();
+  let opened;
+  const f = fixture(t, { remote: false, handle: request => {
+    if (request.route === 'session') {
+      opened = request.opened();
+      return response.promise;
+    }
+  } });
+  const start = f.button('开启接入').emit('click');
+  assert.equal(f.panel.authorized, true);
+  await f.panel.disconnect();
+  response.resolve(json(opened));
+  await start;
+  assert.equal(f.panel.authorized, false);
   assert.equal(f.panel.connected, false);
-  assert.equal(f.panel.boardId, null);
   assert.equal(f.config.value, '');
-  assert.equal(f.document.querySelector('#mcp-permission').value, 'read');
   assert.equal(f.calls.filter(call => call.route === 'poll').length, 0);
   assert.equal(f.calls.filter(call => call.route === 'disconnect').length, 1);
+  assert.match(f.calls.find(call => call.route === 'session').body.pageId, /^[a-f0-9-]{36}$/u);
 });
 
 test('异步读取途中 pagehide 撤销，读取完成也不向中继回传画布', async t => {
@@ -224,6 +249,95 @@ test('读写结果回执丢失后只重传结果，不重复执行同一批编�
   assert.equal(f.calls.every(call => call.options.credentials === 'omit'), true);
 });
 
+test('切换画布后可按显式 ID 编辑原画布，授权检查不绑定当前画布', async t => {
+  const edited = deferred();
+  let polls = 0;
+  let authorized;
+  let received;
+  const f = fixture(t, {
+    handle: request => {
+      if (request.route === 'poll' && ++polls === 1)
+        return json({ requestId: 'target-a', tool: 'edit_canvas', arguments: { boardId: 'board-a', operations: [] }, expiresAt: Date.now() + 10000 });
+    },
+    editCanvas: (args, context) => {
+      received = args;
+      authorized = context.isAuthorized;
+      return edited.promise;
+    }
+  });
+  f.document.querySelector('#mcp-permission').value = 'write';
+  await f.button('开启接入').emit('click');
+  await until(() => authorized);
+  f.changeBoard('board-b');
+  assert.equal(authorized(), true);
+  edited.resolve({ ok: true, revision: '3'.repeat(64) });
+  await until(() => f.calls.some(call => call.route === 'result'));
+  assert.deepEqual(received, { boardId: 'board-a', operations: [] });
+  assert.equal(f.panel.connected, true);
+  assert.equal(f.calls.filter(call => call.route === 'disconnect').length, 0);
+});
+
+test('读取、列举与导出均收到目标参数和可撤销授权，导出不需要写权限', async t => {
+  const requests = [
+    { requestId: 'list', tool: 'list_canvases', arguments: {} },
+    { requestId: 'read', tool: 'get_canvas', arguments: { boardId: 'board-a' } },
+    { requestId: 'export', tool: 'export_canvas', arguments: { boardId: 'board-b' } }
+  ];
+  const received = [];
+  const contexts = [];
+  const handler = name => async (args, context) => {
+    received.push({ name, args });
+    contexts.push(context);
+    assert.equal(context.isAuthorized(), true);
+    return { ok: true };
+  };
+  const f = fixture(t, {
+    handle: request => {
+      if (request.route === 'poll' && requests.length)
+        return json({ ...requests.shift(), expiresAt: Date.now() + 10000 });
+    },
+    listCanvases: handler('list'),
+    readCanvas: handler('read'),
+    exportCanvas: handler('export')
+  });
+  await f.button('开启接入').emit('click');
+  await until(() => f.calls.filter(call => call.route === 'result').length === 3);
+  assert.deepEqual(received, [
+    { name: 'list', args: {} },
+    { name: 'read', args: { boardId: 'board-a' } },
+    { name: 'export', args: { boardId: 'board-b' } }
+  ]);
+  await f.panel.disconnect();
+  assert.equal(contexts.every(context => !context.isAuthorized()), true);
+});
+
+test('创建画布复用读写授权，回执重试不重复创建且新增后接入仍有效', async t => {
+  let created = 0;
+  let polls = 0;
+  let acknowledgements = 0;
+  const pending = { requestId: 'create-once', tool: 'create_canvas', arguments: { title: '虚构新增画布' }, expiresAt: Date.now() + 10000 };
+  const f = fixture(t, {
+    handle: request => {
+      if (request.route === 'poll' && ++polls <= 2) return json(pending);
+      if (request.route === 'result' && ++acknowledgements === 1)
+        throw new TypeError('模拟回执丢失');
+    },
+    createCanvas: async (args, context) => {
+      assert.equal(args.title, '虚构新增画布');
+      assert.equal(context.isAuthorized(), true);
+      created += 1;
+      f.changeBoard('new-board');
+      assert.equal(context.isAuthorized(), true);
+      return { ok: true, board: { id: 'new-board' } };
+    }
+  });
+  f.document.querySelector('#mcp-permission').value = 'write';
+  await f.button('开启接入').emit('click');
+  await until(() => acknowledgements === 2);
+  assert.equal(created, 1);
+  assert.equal(f.panel.connected, true);
+});
+
 test('默认只读在浏览器侧也拒绝编辑，配置复制失败时展开后选择文本', async t => {
   let edits = 0;
   let delivered = false;
@@ -247,10 +361,43 @@ test('默认只读在浏览器侧也拒绝编辑，配置复制失败时展开�
   assert.equal(f.document.activeElement, f.config);
 });
 
+test('默认只读在浏览器侧拒绝新增画布', async t => {
+  let delivered = false;
+  let created = 0;
+  const f = fixture(t, {
+    handle: request => {
+      if (request.route === 'poll' && !delivered) {
+        delivered = true;
+        return json({ requestId: 'read-only-create', tool: 'create_canvas', arguments: { title: '不应创建' }, expiresAt: Date.now() + 10000 });
+      }
+    },
+    createCanvas: async () => { created += 1; }
+  });
+  await f.button('开启接入').emit('click');
+  await until(() => f.calls.some(call => call.route === 'result'));
+  assert.equal(created, 0);
+  assert.equal(f.calls.find(call => call.route === 'result').body.result.code, 'READ_ONLY');
+});
+
 test('服务返回其他页面的授权时拒绝配置，并立即请求撤销', async t => {
   const f = fixture(t, { handle: request => {
     if (request.route === 'session')
       return json({ ...request.opened(), pageId: 'another-page' });
+  } });
+  await f.button('开启接入').emit('click');
+  assert.equal(f.panel.connected, false);
+  assert.equal(f.config.value, '');
+  assert.equal(f.calls.filter(call => call.route === 'poll').length, 0);
+  assert.equal(f.calls.filter(call => call.route === 'disconnect').length, 1);
+});
+
+test('旧版单画布授权响应不得升级为全画布授权', async t => {
+  const f = fixture(t, { handle: request => {
+    if (request.route === 'session') {
+      const opened = request.opened();
+      delete opened.scope;
+      return json({ ...opened, boardId: 'board-a' });
+    }
   } });
   await f.button('开启接入').emit('click');
   assert.equal(f.panel.connected, false);

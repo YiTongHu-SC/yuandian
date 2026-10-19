@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { createMcpHandler } from '@modelcontextprotocol/server';
 import { createCanvasMcpServer } from './mcp-server.mjs';
+import { inspectMcpCall, inspectMcpGrant, inspectMcpResult } from './mcp-access.mjs';
 
 const HOUR = 60 * 60 * 1000;
 const object = (value) =>
@@ -199,16 +200,12 @@ export function createRemoteMcpBridge({
   async function call(token, tool, arguments_, signal) {
     const session = authorized(token);
     if (!session) return failure('unauthorized', '连接未授权或已过期，请在原点重新授权。');
-    if (!['connection_status', 'get_canvas', 'edit_canvas'].includes(tool) || !object(arguments_))
-      return failure('invalid_tool', '无效的工具调用。');
-    if (tool !== 'edit_canvas' && Object.keys(arguments_).length)
-      return failure('invalid_arguments', '此工具不接受参数。');
+    const callError = inspectMcpCall(session, tool, arguments_);
+    if (callError) return callError.value;
     if (tool === 'connection_status') return {
-      ok: true, connected: true, boardId: session.boardId, pageId: session.pageId,
+      ok: true, connected: true, scope: session.scope, boardId: session.boardId, pageId: session.pageId,
       mode: session.mode, expiresAt: session.expiresAt, heartbeatAt: session.heartbeat
     };
-    if (tool === 'edit_canvas' && session.mode !== 'write')
-      return failure('read_only', '当前连接只允许读取，编辑需在原点重新授权。');
     if (session.pending.size >= maxPending || pendingTotal >= 64)
       return failure('queue_full', '等待中的请求过多，请等待已有请求完成。');
     if (signal?.aborted) return failure('client_closed', 'AI 客户端已断开，请重新读取最新画布。');
@@ -270,15 +267,15 @@ export function createRemoteMcpBridge({
       if (!limit(`create:${clientAddress}`, 8))
         return deny(429, 'rate_limit', '开启接入过于频繁，请稍后重试。');
       const input = await boundedJson(request, 8192);
-      if (!exactKeys(input, ['boardId', 'pageId', 'mode']) || typeof input.boardId !== 'string' || !input.boardId.length || input.boardId.length > 100 || !uuid.test(input.pageId || '') || (input.mode !== undefined && !['read', 'write'].includes(input.mode)))
-        return deny(400, 'invalid_session', '请选择当前单张画布、页面和读取或编辑权限。');
+      const grant = inspectMcpGrant(input, { requireLegacyPageId: true });
+      if (!grant) return deny(400, 'invalid_session', '请选择有效的页面授权范围与读取或编辑权限。');
       // A body read can overlap expiration, shutdown or another authorization.
       sweep();
       if (closed) return deny(503, 'unavailable', 'MCP 中继已停止。');
       if (sessions.size >= maxSessions)
         return deny(429, 'session_limit', '连接过多，请先断开不用的连接。');
       const session = {
-        boardId: input.boardId, pageId: input.pageId, mode: input.mode || 'read',
+        ...grant,
         ownerToken: randomBytes(32).toString('hex'), clientToken: randomBytes(32).toString('hex'),
         expiresAt: now() + sessionTtlMs, heartbeat: now(), pending: new Map(), acknowledged: new Map(), poll: null
       };
@@ -287,7 +284,7 @@ export function createRemoteMcpBridge({
       clients.set(session.clientToken, session);
       return json(201, {
         ownerToken: session.ownerToken, clientToken: session.clientToken,
-        boardId: session.boardId, pageId: session.pageId, mode: session.mode, expiresAt: session.expiresAt,
+        scope: session.scope, boardId: session.boardId, pageId: session.pageId, mode: session.mode, expiresAt: session.expiresAt,
         config: { url: `${publicUrl}/mcp`, headers: { Authorization: `Bearer ${session.clientToken}` } }
       });
     }
@@ -339,8 +336,8 @@ export function createRemoteMcpBridge({
     const item = session.pending.get(input.requestId);
     if (!item || !item.delivered || now() >= item.expiresAt)
       return deny(404, 'request_finished', '请求已结束或不属于此连接；请重新读取画布。');
-    if (input.result.ok && item.tool === 'get_canvas' && input.result.board?.id !== session.boardId)
-      return deny(400, 'scope_mismatch', '响应不属于已授权的画布。');
+    const resultError = inspectMcpResult(session, item, input.result);
+    if (resultError) return json(resultError.status, resultError.value);
     session.acknowledged.set(input.requestId, { signature, until: now() + 60000 });
     if (session.acknowledged.size > 32) session.acknowledged.delete(session.acknowledged.keys().next().value);
     settle(session, item, input.result);

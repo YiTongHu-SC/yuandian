@@ -44,8 +44,9 @@ GitHub Pages 的产物由 `scripts/build-pages.mjs` 复制到已忽略的 `dist/
 | `src/canvas/history.js` | 按画布隔离的会话撤销与重做记录 |
 | `src/canvas/geometry.js` | 视图坐标换算、坐标限幅与连接曲线等纯计算 |
 | `src/canvas/mcp-model.js` | MCP 编辑白名单与 JSON Schema、内容版本、原子操作及最终 v1 校验；无 DOM 或存储 |
+| `src/canvas/mcp-workspace-model.js` | 跨画布列举、按 ID 读取和编辑、新建、兼容 JSON 导出、工作区版本；复用卡片模型，无 DOM 或存储 |
 | `src/canvas/mcp-connection.js` | 允许接入的来源与路径、固定中继地址、本机 / 远程参数及 Codex TOML 生成 |
-| `src/canvas/mcp-ui.js` | 单张画布授权面板、临时配置、页面轮询、会话与请求期限检查 |
+| `src/canvas/mcp-ui.js` | 全部自由画布临时授权面板、页面实例及配置、页面轮询、各工具的可撤销授权检查 |
 | `src/canvas/styles.css` | 自由画布布局、卡片和交互视觉 |
 
 应用入口调用模型处理数据，再将用户内容作为文本显示。纯模块不依赖 DOM、网络或旧六步工具。会话历史与选择不写入数据格式；视图位置保存在画布数据中，但不进入节点编辑撤销。
@@ -63,7 +64,7 @@ GitHub Pages 的产物由 `scripts/build-pages.mjs` 复制到已忽略的 `dist/
   → scripts/mcp-server.mjs（官方 SDK，MCP stdio）
   → scripts/mcp-bridge.mjs（127.0.0.1 HTTP，临时令牌和请求队列）
   → src/canvas/mcp-ui.js（授权页面轮询）
-  → app.js / mcp-model.js（版本、原子校验、保存和撤销）
+  → app.js / mcp-workspace-model.js / mcp-model.js（目标、版本、原子校验、保存和撤销）
   → 当前浏览器 localStorage
 
 线上 Codex
@@ -71,18 +72,20 @@ GitHub Pages 的产物由 `scripts/build-pages.mjs` 复制到已忽略的 `dist/
   → Caddy → scripts/mcp-remote-server.mjs（127.0.0.1:4177）
   → scripts/mcp-remote-bridge.mjs（内存授权与请求队列）
   ← Pages 的 mcp-ui.js 主动发起 HTTPS 长轮询
-  → 同一 app.js / mcp-model.js → 当前浏览器 localStorage
+  → 同一 app.js / MCP 纯模型 → 当前浏览器 localStorage
 ```
 
-`mcp-server.mjs` 仅注册读取、编辑及连接状态三个工具，通过环境变量接收本机 URL 与客户端令牌。它不直接读取磁盘备份或浏览器存储；标准输出仅承载 MCP 消息。官方服务端 SDK 为运行依赖，客户端 SDK 为实际 stdio 测试的开发依赖，均锁定在 2.3.1。
+`mcp-server.mjs` 共注册连接状态、列举、读取、编辑、新建及导出六个工具，通过环境变量接收本机 URL 与客户端令牌；远程服务复用相同注册。它不直接读取磁盘备份或浏览器存储；导出返回浏览器生成的 JSON 字符串，由客户端决定是否存文件，不让中继落盘或强制浏览器下载。标准输出仅承载 MCP 消息。官方服务端 SDK 为运行依赖，客户端 SDK 为实际 stdio 测试的开发依赖，均锁定在 2.3.1。
 
-`mcp-bridge.mjs` 按需由本机服务加载，使用不同的页面令牌和 AI 客户端令牌，校验 Host / Origin、工具与只读权限；只在进程内保留会话、请求及短暂结果，不写画布文件。授权绑定当前画布，最长一小时，页面心跳中断超过十秒或主动断开即失效；每项请求十五秒过期。
+`mcp-bridge.mjs` 按需由本机服务加载，使用不同的页面令牌和 AI 客户端令牌，校验 Host / Origin、工具与只读权限；只在进程内保留会话、请求及短暂结果，不写画布文件。新面板按页面实例创建 `workspace` 授权，覆盖该浏览器该站点全部自由画布，最长一小时；页面心跳中断超过十秒或主动断开即失效，每项请求十五秒过期。
 
-`mcp-remote-server.mjs` 提供单个回环监听，由 Caddy 终止 HTTPS 并剥离 `/yuandian-mcp` 前缀；systemd 使用独立低权限用户管理进程。`mcp-remote-bridge.mjs` 复用三工具注册和纯模型，增加远程 MCP 端点、精确 Origin / Host 校验、请求大小与速率限制、双令牌及有界内存队列。浏览器每次长轮询最多等待 20 秒，远程请求 30 秒过期、心跳失联 90 秒失效，授权最长一小时。页面实例、单画布、权限、期限共同限定会话；刷新、切换、断开及服务重启需重新授权。
+`mcp-remote-server.mjs` 提供单个回环监听，由 Caddy 终止 HTTPS 并剥离 `/yuandian-mcp` 前缀；systemd 使用独立低权限用户管理进程。`mcp-remote-bridge.mjs` 复用六工具注册和纯模型，增加远程 MCP 端点、精确 Origin / Host 校验、请求大小与速率限制、双令牌及有界内存队列。浏览器每次长轮询最多等待 20 秒，远程请求 30 秒过期、心跳失联 90 秒失效，授权最长一小时。页面实例、授权范围、权限和期限共同限定会话；刷新、关闭、断开及服务重启需重新授权，切换 / 新建 / 删除 / 导入画布不撤销工作区授权。
+
+`scripts/mcp-access.mjs` 是两种桥共同的授权和工具范围检查：默认只读，工作区编辑必须显式传 `boardId`，新建须传 `expectedWorkspaceRevision`，导出全部不能同时指定单张 ID。旧页面没有 `scope` 的请求保留原 `canvas` 单画布范围，拒绝列举、新建、全部导出或其他 ID；不会因服务更新自动扩大旧令牌权限。新面板拒绝旧范围的授权响应。
 
 两种桥都只转发授权页面的内容。远程内容会经过服务器及 AI 客户端，不将浏览器数据改为云端保存；无账号、数据库、离线队列或同步。中继不记录内容和凭据，Caddy 对中继路径跳过访问日志。仅部署一个进程，不以多实例共享授权；重启使全部临时会话失效。部署模板位于 `deploy/remote-mcp/`，实际主机改动与回退方法见部署说明。
 
-`app.js` 保留数据所有权：获取同源写锁后检查编辑和保存状态，在副本上执行操作；异步摘要完成后重新检查捕获的原会话授权、请求期限和全工作区指纹，再通过 `save(expectedRaw)` 比较保存。只有保存成功才替换内存并新增一次撤销记录；期间修改、断开、切换、超时、损坏数据或跨页冲突均不能被 AI 静默覆盖。完整接口与生命周期见 [MCP 接入指南](mcp.md)。
+`app.js` 保留数据所有权：读操作在异步前后检查捕获的授权；写操作获取同源写锁后检查编辑和保存状态，在副本上执行操作，异步摘要完成后重新检查原会话授权、请求期限和全工作区指纹，再通过 `save(expectedRaw)` 比较保存。只有保存成功才替换内存并回执。修改记入目标画布的会话历史，不切换当前画布；新增默认不切换当前画布，通过通知提供撤销新增，已有后续内容改动则拒绝删除。期间修改、断开、超时、损坏数据或跨页冲突均不能被 AI 静默覆盖；异步期间切换可能使当次写入冲突，但不会撤销工作区授权。完整接口与生命周期见 [MCP 接入指南](mcp.md)。
 
 ## 旧六步工具
 

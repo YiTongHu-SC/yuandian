@@ -64,7 +64,7 @@ Node 官方发行包的 SHA-256 已与 [官方校验清单](https://nodejs.org/d
 
 ### 发布与回退约定
 
-后端负载严格限定七个文件：`package.json`、`package-lock.json`、`scripts/mcp-server.mjs`、`scripts/mcp-remote-server.mjs`、`scripts/mcp-remote-bridge.mjs`、`src/canvas/mcp-model.js`、`src/canvas/model.js`。从已核验提交取字节、记录清单和 SHA-256；服务器独立新版本目录执行 `npm ci --omit=dev --ignore-scripts --no-audit --no-fund`，不上传完整仓库、画布、测试或个人资料。
+当前后端负载严格限定九个文件：`package.json`、`package-lock.json`、`scripts/mcp-server.mjs`、`scripts/mcp-remote-server.mjs`、`scripts/mcp-remote-bridge.mjs`、`scripts/mcp-access.mjs`、`src/canvas/mcp-model.js`、`src/canvas/mcp-workspace-model.js`、`src/canvas/model.js`。首次部署为七个文件，工作区授权增加共享权限校验与跨画布纯模型两项。从已核验提交取字节、记录清单和 SHA-256；服务器独立新版本目录执行 `npm ci --omit=dev --ignore-scripts --no-audit --no-fund`，不上传完整仓库、画布、测试或个人资料。
 
 服务模板见 [systemd](../deploy/remote-mcp/yuandian-mcp.service) 与 [Caddy 路由片段](../deploy/remote-mcp/stellarcore-route.caddy)。模板不是服务器完整配置：需先读取当前 Caddyfile，备份并保留其他站点原文，将主站原 `try_files` / `file_server` 纳入模板的字面顺序路由。单独在原全站 `try_files` 旁追加反代可能先被重写为首页，必须用 `caddy validate` 和 `caddy adapt` 检查最终顺序。该路径使用 `log_skip`，Node 也不记录正文或令牌。
 
