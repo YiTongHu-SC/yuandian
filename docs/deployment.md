@@ -27,4 +27,12 @@ npm run build:pages
 
 ## 部署验证
 
-部署后检查 Actions 成功、实际 Pages 地址可访问、两个入口及脚本 / 样式正常加载，并用虚构数据验证编辑、刷新保存及 JSON 回导。线上不应显示本机 AI 接入。部署流水线和模型测试不能替代这些页面操作；本次实际结果由执行发布的任务补记。
+2026-10-19 实际发布与检查：
+
+- 已创建 public 仓库 `YiTongHu-SC/yuandian`，默认分支 `main`，本地 `origin` 指向该独立仓库。Pages 的 `build_type` 为 `workflow`，已强制 HTTPS。
+- 首次发布提交为 `ca7fb37`；[Actions 构建与部署](https://github.com/YiTongHu-SC/yuandian/actions/runs/39179182592)均成功。工作流固定官方 action 的 SHA，只上传 13 个运行文件。
+- 本机 `npm run verify` 的 102 项测试全部通过，`build:pages` 成功。公开地址和两个 HTML 入口返回 200；逐一请求全部 13 个运行文件，与 Git 提交中的文件内容一致。站点下的 `private/`、`backups/`、Git 配置、Node 服务、项目文档及历史截图路径返回 404。
+- 本次内置浏览器能打开公开地址并识别标题，但远程页的 DOM / 调试控制持续超时，因此没有将公网 HTTPS 上的直接交互列为通过。
+- 对相同静态产物在隔离地址 `http://localhost:4192/pages/` 进行实际浏览器验证：空卡片编辑、Tab 分支连线、改名、刷新保存、真实 JSON 下载与预览后追加回导均通过；原画布保留并生成副本。兼容入口正常显示，两页控制台均无警告或错误。非本机回环主机名不显示“AI 接入”；另开正式 `127.0.0.1:4176` 页面确认该入口仍显示。此结果是静态预览验证，不替代公网实机验证。
+
+[静态产物预览截图](../assets/screenshots/pages-static-preview.png)仅含虚构内容。预览页面与临时服务已关闭，未修改日常画布、清空 localStorage 或上传本机数据。此次只验证旧六步入口加载，未重新执行其完整交互流程。
