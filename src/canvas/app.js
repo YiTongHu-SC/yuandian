@@ -78,8 +78,7 @@ let corrupt = loaded.status === 'invalid',
   dragging = null,
   connecting = false,
   connectFrom = null;
-let marqueeMode = false,
-  spaceHeld = false;
+let spaceHeld = false;
 let stage,
   world,
   svg,
@@ -453,18 +452,6 @@ function build() {
     'div',
     { class: 'toolbar', 'aria-label': '画布操作' },
     button('＋ 卡片', () => addIdea(), 'primary', { 'aria-label': '新增卡片' }),
-    button('框选', () => {
-      finishEdit();
-      closeMenus();
-      cancelConnect();
-      marqueeMode = !marqueeMode;
-      updateTools();
-      stage.focus();
-    }, '', {
-      id: 'marquee-toggle',
-      'aria-pressed': 'false',
-      title: '框选多张卡片后整体移动；也可 Shift + 拖动空白'
-    }),
     button('↶', () => undo(), '', {
       id: 'undo',
       title: '撤销 Ctrl / ⌘ Z',
@@ -560,7 +547,7 @@ function build() {
     class: 'stage',
     id: 'stage',
     tabindex: '0',
-    'aria-label': '自由思考画布，双击空白处新增卡片'
+    'aria-label': '自由思考画布，左键框选或单选，右键拖动平移，双击空白处新增卡片'
   });
   world = h('div', { class: 'world' });
   svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -826,9 +813,7 @@ function updateTools() {
   ])
     $('#' + id).disabled = !enabled;
   stage.classList.toggle('connecting', connecting);
-  stage.classList.toggle('marquee-mode', marqueeMode && !spaceHeld);
-  $('#marquee-toggle').classList.toggle('active', marqueeMode);
-  $('#marquee-toggle').setAttribute('aria-pressed', String(marqueeMode));
+  stage.classList.toggle('pan-ready', spaceHeld);
   const selectedIds = new Set(selectedNodeIds());
   nodeEls.forEach((el, id) => {
     el.classList.toggle(
@@ -1295,13 +1280,13 @@ function cancelDrag() {
 function bindCanvas() {
   stage.addEventListener('pointerdown', (e) => {
     if (dragging) return;
-    if (e.button !== 0 && e.button !== 1) return;
+    if (![0, 1, 2].includes(e.button)) return;
     if (e.target.closest('button,textarea')) return;
     finishEdit();
     $('.help-pop')?.remove();
     const idea = e.target.closest('.idea'),
       edge = e.target.closest('[data-edge-id]'),
-      pan = e.button === 1 || spaceHeld;
+      pan = e.button === 1 || e.button === 2 || spaceHeld;
     if (connecting && idea && !pan) {
       e.preventDefault();
       linkTo(idea.dataset.nodeId);
@@ -1325,10 +1310,11 @@ function bindCanvas() {
       const ids = new Set(selectedNodeIds());
       dragging = {
         kind: 'node',
+        clickId: idea.dataset.nodeId,
         nodes: board().nodes.filter((n) => ids.has(n.id)).map(({ id, x, y }) => ({ id, x, y })),
         before: snapshot()
       };
-    } else if (!pan && (marqueeMode || e.shiftKey)) {
+    } else if (!pan) {
       cancelConnect();
       dragging = {
         kind: 'marquee',
@@ -1338,7 +1324,6 @@ function bindCanvas() {
       selection = null;
       stage.append(h('div', { class: 'marquee', 'aria-hidden': 'true' }));
     } else {
-      if (!pan) selection = null;
       dragging = {
         kind: 'pan',
         nx: board().view.x,
@@ -1402,6 +1387,8 @@ function bindCanvas() {
     if (!dragging || e.pointerId !== dragging.pointerId) return;
     move(e);
     const old = clearDrag();
+    if (old.kind === 'node' && !old.changed)
+      selection = { kind: 'node', id: old.clickId };
     if (old.changed) {
       if (old.kind === 'node' && snapshot() !== old.before) {
         pushHistory(old.before);
@@ -1416,7 +1403,12 @@ function bindCanvas() {
   };
   stage.addEventListener('pointercancel', cancel);
   stage.addEventListener('lostpointercapture', cancel);
+  stage.addEventListener('contextmenu', (e) => {
+    if (!e.target.closest('textarea,input,[contenteditable=true]'))
+      e.preventDefault();
+  });
   stage.addEventListener('dblclick', (e) => {
+    if (e.button !== 0) return;
     if (!e.target.closest('.idea,[data-edge-id]') && !connecting) {
       e.preventDefault();
       addIdea(worldPoint(e.clientX, e.clientY));
@@ -1704,9 +1696,9 @@ function toggleHelp() {
     h(
       'p',
       {},
-      '点卡片旁的“⋯”换色或删除。拖动空白处平移；Ctrl / ⌘ + 滚轮缩放，“显示全部”找回卡片。'
+      '点卡片旁的“⋯”换色或删除。按住鼠标右键拖动平移画布；Ctrl / ⌘ + 滚轮缩放，“显示全部”找回卡片。'
     ),
-    h('p', {}, '点顶部“框选”，或按住 Shift 拖动空白，框选多张卡片；拖动任一所选卡片整体移动。点“删除所选”或按 Delete / Backspace 批量删除，一次撤销恢复卡片及连线。点空白或 Esc 取消多选；框选模式下可按住空格或用中键拖动平移。'),
+    h('p', {}, '左键点击卡片单选，拖动空白框选多张卡片；拖动任一所选卡片整体移动。点“删除所选”或按 Delete / Backspace 批量删除，一次撤销恢复卡片及连线。点空白或 Esc 取消多选；也可按住空格或用中键拖动平移。'),
     h('p', {}, '点击顶部画布名称改名；旁边菜单可切换、新建或删除画布。'),
     h(
       'p',
@@ -1803,7 +1795,6 @@ document.addEventListener('keydown', (e) => {
       return;
     }
     if (selection?.kind === 'nodes') selection = null;
-    marqueeMode = false;
     const focusBack = !$('#file-menu').hidden
       ? '#file-menu-toggle'
       : !$('#board-menu').hidden

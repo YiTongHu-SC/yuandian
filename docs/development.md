@@ -73,6 +73,8 @@ MCP 卡片纯操作测试位于 `tests/unit/canvas-mcp.test.mjs`，跨画布模�
 
 ## 验证证据与提交
 
+2026-10-20 默认左键框选 / 单选与右键平移的本轮检查、真实页面及限制见 [鼠标选择验证](mouse-selection-validation.md)。
+
 2026-10-20 多选批量删除与一次恢复卡片及连线的本轮检查、真实页面和限制见 [批量删除验证](bulk-delete-validation.md)。
 
 2026-10-20 框选多卡与整体移动的本轮检查、隔离页面操作及覆盖限制见 [框选验证](marquee-validation.md)。

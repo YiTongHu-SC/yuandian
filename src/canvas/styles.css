@@ -283,7 +283,7 @@ a {
   overflow: hidden;
   touch-action: none;
   outline: none;
-  cursor: grab;
+  cursor: crosshair;
   background-color: #f7f8f3;
   background-image: radial-gradient(#c5cfbd 0.8px, transparent 0.8px);
   background-size: 24px 24px;
@@ -291,9 +291,11 @@ a {
 .stage.connecting {
   cursor: crosshair;
 }
-.stage.marquee-mode,
 .stage.selecting {
   cursor: crosshair;
+}
+.stage.pan-ready {
+  cursor: grab;
 }
 .stage.panning,
 .stage.dragging {
