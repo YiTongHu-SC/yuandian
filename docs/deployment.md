@@ -1,6 +1,8 @@
 # GitHub Pages 与远程 MCP 部署
 
-更新日期：2026-10-19，Asia/Shanghai。
+更新日期：2026-10-20，Asia/Shanghai。
+
+2026-10-20 框选多卡与整体移动已随提交 `fee5612` 发布；本轮 Actions、17 个运行文件一致性和真实线上框选、整组移动、撤销重做及刷新保存记录见 [框选验证](marquee-validation.md#线上发布与验收)。未修改或部署 MCP 后端。
 
 2026-10-19 卡片方向键、同级新增与 Esc 保存已随提交 `84e69e3` 发布；本轮 Actions、资源一致性和真实线上操作记录见 [卡片快捷键验证](keyboard-validation.md#线上发布与验收)。
 
