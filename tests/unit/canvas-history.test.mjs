@@ -76,6 +76,75 @@ test('one undo and redo restore a whole card-group move, preserve links and leav
   assert.equal(history.redo(board), false);
 });
 
+test('one undo restores a deleted selection and every related labelled link, and redo deletes the whole selection again', () => {
+  const board = createBoard('整批删除'), history = createHistory();
+  board.nodes = [
+    createNode('选中 A\n第二行', -120, 80, 'blue'),
+    createNode('选中 B', 200, -60, 'green'),
+    createNode('未选中 C', 560, 120, 'rose'),
+    createNode('未选中 D', 560, -160, 'cream')
+  ];
+  const [a, b, c, d] = board.nodes;
+  for (const [from, to, label] of [
+    [a, b, '所选卡片之间'],
+    [b, a, '返回形成环'],
+    [c, a, '外部父卡片一'],
+    [d, a, '外部父卡片二'],
+    [b, c, '连接外部卡片'],
+    [c, d, '未选卡片之间保留']
+  ]) connect(board, from.id, to.id).label = label;
+  const original = structuredClone({ nodes: board.nodes, edges: board.edges });
+  const before = snapshotBoard(board);
+  const remainingNodes = structuredClone([c, d]);
+  const remainingEdges = structuredClone(board.edges.filter((edge) => edge.from === c.id && edge.to === d.id));
+
+  change(history, board, () => {
+    for (const id of [a.id, b.id]) assert.equal(deleteNode(board, id), true);
+  });
+  assert.deepEqual(board.nodes, remainingNodes);
+  assert.deepEqual(board.edges, remainingEdges);
+  const after = snapshotBoard(board);
+
+  assert.equal(history.undo(board), true);
+  assert.equal(snapshotBoard(board), before);
+  assert.deepEqual(board.nodes, original.nodes);
+  assert.deepEqual(board.edges, original.edges);
+  assert.equal(history.canUndo(board.id), false);
+  assert.equal(history.undo(board), false);
+
+  assert.equal(history.redo(board), true);
+  assert.equal(snapshotBoard(board), after);
+  assert.deepEqual(board.nodes, remainingNodes);
+  assert.deepEqual(board.edges, remainingEdges);
+  assert.equal(history.canRedo(board.id), false);
+  assert.equal(history.redo(board), false);
+});
+
+test('deleting every selected card can leave an empty board and one undo restores all cards and links', () => {
+  const board = createBoard('全部删除'), history = createHistory();
+  board.nodes = [
+    createNode('第一张', -210, 40, 'rose'),
+    createNode('第二张', 130, -90, 'blue')
+  ];
+  connect(board, board.nodes[0].id, board.nodes[1].id).label = '一起恢复';
+  connect(board, board.nodes[1].id, board.nodes[0].id).label = '反向连线';
+  const before = snapshotBoard(board);
+  const selectedIds = board.nodes.map((node) => node.id);
+
+  change(history, board, () => {
+    for (const id of selectedIds) assert.equal(deleteNode(board, id), true);
+  });
+  assert.deepEqual(board.nodes, []);
+  assert.deepEqual(board.edges, []);
+  assert.equal(history.undo(board), true);
+  assert.equal(snapshotBoard(board), before);
+  assert.equal(history.undo(board), false);
+  assert.equal(history.redo(board), true);
+  assert.deepEqual(board.nodes, []);
+  assert.deepEqual(board.edges, []);
+  assert.equal(history.redo(board), false);
+});
+
 test('histories are independent for each board and clear when another tab replaces the workspace', () => {
   const a = createBoard(),
     b = createBoard(),

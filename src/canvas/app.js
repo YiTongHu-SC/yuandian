@@ -919,6 +919,10 @@ function updateTools() {
   } else if (selection?.kind === 'nodes') {
     tools.append(
       h('span', { class: 'selection-summary', role: 'status' }, `已选 ${selection.ids.length} 张 · 拖动任一卡片移动`),
+      button('删除所选', removeSelected, 'small danger', {
+        'aria-label': '删除所选卡片',
+        title: '删除所选卡片（Delete / Backspace），可一次撤销'
+      }),
       button('取消选择', () => {
         selection = null;
         updateTools();
@@ -1196,16 +1200,18 @@ function finishEdit() {
 function removeSelected() {
   finishEdit();
   closeMenus();
-  if (!selection || selection.kind === 'nodes') return;
+  if (!selection) return;
   const before = snapshot();
-  if (selection.kind === 'node') deleteNode(board(), selection.id);
-  else board().edges = board().edges.filter((e) => e.id !== selection.id);
+  const ids = selectedNodeIds();
+  if (ids.length) {
+    for (const id of ids) deleteNode(board(), id);
+  } else board().edges = board().edges.filter((e) => e.id !== selection.id);
   pushHistory(before);
   selection = null;
   cancelConnect();
   markDirty();
   renderBoard();
-  note('已删除，可以撤销。');
+  note(ids.length > 1 ? `已删除 ${ids.length} 张卡片，可以一次撤销。` : '已删除，可以撤销。');
   stage.focus();
 }
 function zoomAt(factor, client) {
@@ -1700,7 +1706,7 @@ function toggleHelp() {
       {},
       '点卡片旁的“⋯”换色或删除。拖动空白处平移；Ctrl / ⌘ + 滚轮缩放，“显示全部”找回卡片。'
     ),
-    h('p', {}, '点顶部“框选”，或按住 Shift 拖动空白，框选多张卡片；拖动任一所选卡片整体移动，一次撤销。点空白或 Esc 取消多选；框选模式下可按住空格或用中键拖动平移。'),
+    h('p', {}, '点顶部“框选”，或按住 Shift 拖动空白，框选多张卡片；拖动任一所选卡片整体移动。点“删除所选”或按 Delete / Backspace 批量删除，一次撤销恢复卡片及连线。点空白或 Esc 取消多选；框选模式下可按住空格或用中键拖动平移。'),
     h('p', {}, '点击顶部画布名称改名；旁边菜单可切换、新建或删除画布。'),
     h(
       'p',
@@ -1839,7 +1845,7 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     undo(true);
   } else if (e.key === 'Delete' || e.key === 'Backspace') {
-    if (selection && selection.kind !== 'nodes') {
+    if (selection) {
       e.preventDefault();
       removeSelected();
     }
