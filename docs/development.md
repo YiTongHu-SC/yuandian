@@ -73,6 +73,8 @@ MCP 卡片纯操作测试位于 `tests/unit/canvas-mcp.test.mjs`，跨画布模�
 
 ## 验证证据与提交
 
+2026-10-20 框选多卡与整体移动的本轮检查、隔离页面操作及覆盖限制见 [框选验证](marquee-validation.md)。
+
 本机 MCP 的历史实际结果见 [MCP 验证](mcp-validation.md)。2026-10-19 文件菜单的当次结果见 [文件菜单验证](file-menu-validation.md)；此前的 [极简交互验证](ui-validation.md)、[目录整理验证](validation.md)与 [docs/history/](history/CANVAS-VALIDATION.md)保留各自日期的范围、路径、命令和数量，不代表本轮已重新通过。每次交付说明当次运行的命令、结果和界面覆盖范围，不能仅凭目录整理或历史记录推断兼容性。
 
 2026-10-19 方向键、同级卡片与 Esc 保存的当次检查见 [卡片快捷键验证](keyboard-validation.md)。本轮远程部署和验证以 [部署说明](deployment.md) 为准。用户当前要求只用 GPT 内置浏览器；其公网页面控制持续超时时记录阻碍，不改用 Edge、独立无头浏览器或其他控制通道，不把历史静态预览或协议测试标为本轮真实页面通过。

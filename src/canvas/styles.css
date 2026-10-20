@@ -288,12 +288,27 @@ a {
   background-image: radial-gradient(#c5cfbd 0.8px, transparent 0.8px);
   background-size: 24px 24px;
 }
+.stage.connecting {
+  cursor: crosshair;
+}
+.stage.marquee-mode,
+.stage.selecting {
+  cursor: crosshair;
+}
 .stage.panning,
 .stage.dragging {
   cursor: grabbing;
 }
-.stage.connecting {
-  cursor: crosshair;
+.marquee {
+  position: absolute;
+  border: 1px solid #5d9874;
+  background: #8db69b26;
+  pointer-events: none;
+}
+.selection-summary {
+  padding: 0 6px;
+  font-size: 12px;
+  color: #526b57;
 }
 .world {
   position: absolute;

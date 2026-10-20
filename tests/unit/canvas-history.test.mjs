@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHistory, snapshotBoard } from '../../src/canvas/history.js';
+import { groupDragDelta } from '../../src/canvas/geometry.js';
 import {
   createBoard,
   createNode,
@@ -31,6 +32,48 @@ test('undo and redo restore deleted nodes and links without changing the current
   assert.equal(history.redo(board), true);
   assert.equal(board.nodes.length, 1);
   assert.equal(board.edges.length, 0);
+});
+
+test('one undo and redo restore a whole card-group move, preserve links and leave other cards and the viewport unchanged', () => {
+  const board = createBoard('整体移动'), history = createHistory();
+  board.nodes = [
+    createNode('选中 A', -120, 80, 'blue'),
+    createNode('选中 B', 200, -60, 'green'),
+    createNode('未选中', 560, 120, 'rose')
+  ];
+  connect(board, board.nodes[0].id, board.nodes[1].id);
+  connect(board, board.nodes[1].id, board.nodes[2].id);
+  const before = snapshotBoard(board);
+  const unselected = structuredClone(board.nodes[2]);
+  const edges = structuredClone(board.edges);
+  const selected = board.nodes.slice(0, 2);
+  const delta = groupDragDelta(selected, 135, -70);
+  for (const node of selected) {
+    node.x += delta.x;
+    node.y += delta.y;
+  }
+  history.record(board, before);
+  const after = snapshotBoard(board);
+  assert.deepEqual(board.nodes.map(({ x, y }) => ({ x, y })), [
+    { x: 15, y: 10 }, { x: 335, y: -130 }, { x: 560, y: 120 }
+  ]);
+  assert.deepEqual(board.nodes[2], unselected);
+  assert.deepEqual(board.edges, edges);
+  board.view = { x: 45, y: -30, scale: 0.5 };
+  const view = structuredClone(board.view);
+
+  assert.equal(history.undo(board), true);
+  assert.equal(snapshotBoard(board), before);
+  assert.deepEqual(board.view, view);
+  assert.equal(history.canUndo(board.id), false);
+  assert.equal(history.undo(board), false);
+
+  assert.equal(history.redo(board), true);
+  assert.equal(snapshotBoard(board), after);
+  assert.deepEqual(board.nodes[2], unselected);
+  assert.deepEqual(board.edges, edges);
+  assert.deepEqual(board.view, view);
+  assert.equal(history.redo(board), false);
 });
 
 test('histories are independent for each board and clear when another tab replaces the workspace', () => {

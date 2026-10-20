@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import {
   coordinate,
   worldPoint,
+  rectangleBetween,
+  nodesInRectangle,
+  groupDragDelta,
   directionalNode,
   connectionCurve
 } from '../../src/canvas/geometry.js';
@@ -29,6 +32,88 @@ test('drag coordinates stop at the supported model limits', () => {
   assert.equal(coordinate(LIMITS.coordinate + 100), LIMITS.coordinate);
   assert.equal(coordinate(-LIMITS.coordinate - 100), -LIMITS.coordinate);
   assert.equal(coordinate(-123.75), -123.75);
+});
+
+test('selection rectangles normalize all drag directions in world coordinates', () => {
+  const expected = { left: -80, top: -60, right: 320, bottom: 150 };
+  for (const [start, end] of [
+    [{ x: -80, y: -60 }, { x: 320, y: 150 }],
+    [{ x: 320, y: 150 }, { x: -80, y: -60 }],
+    [{ x: -80, y: 150 }, { x: 320, y: -60 }],
+    [{ x: 320, y: -60 }, { x: -80, y: 150 }]
+  ]) assert.deepEqual(rectangleBetween(start, end), expected);
+});
+
+test('marquee selection includes whole and partially intersecting cards in board order', () => {
+  const nodes = [
+    { id: 'inside', x: 20, y: 20 },
+    { id: 'partial-left', x: -224, y: 10 },
+    { id: 'partial-top', x: 100, y: -97 },
+    { id: 'partial-right', x: 299, y: 50 },
+    { id: 'partial-bottom', x: 80, y: 199 },
+    { id: 'outside', x: 500, y: 500 }
+  ];
+  const start = { x: 0, y: 0 }, end = { x: 300, y: 200 };
+  const expected = ['inside', 'partial-left', 'partial-top', 'partial-right', 'partial-bottom'];
+  assert.deepEqual(nodesInRectangle(nodes, start, end), expected);
+  assert.deepEqual(nodesInRectangle(nodes, end, start), expected);
+  assert.deepEqual(nodesInRectangle(nodes, { x: end.x, y: start.y }, { x: start.x, y: end.y }), expected);
+});
+
+test('marquee selection excludes cards that only touch rectangle edges', () => {
+  const nodes = [
+    { id: 'left', x: -225, y: 20 },
+    { id: 'right', x: 300, y: 20 },
+    { id: 'top', x: 20, y: -98 },
+    { id: 'bottom', x: 20, y: 200 },
+    { id: 'corner', x: -225, y: -98 }
+  ];
+  assert.deepEqual(nodesInRectangle(nodes, { x: 0, y: 0 }, { x: 300, y: 200 }), []);
+});
+
+test('marquee selection uses measured card height and rejects zero-area rectangles', () => {
+  const nodes = [{ id: 'tall', x: -100, y: -150 }, { id: 'short', x: 0, y: -150 }];
+  const heights = new Map([['tall', 400]]);
+  assert.deepEqual(nodesInRectangle(nodes, { x: 10, y: 150 }, { x: 20, y: 240 }, heights), ['tall']);
+  assert.deepEqual(nodesInRectangle(nodes, { x: 10, y: 150 }, { x: 20, y: 240 }), []);
+  assert.deepEqual(nodesInRectangle(nodes, { x: 10, y: -150 }, { x: 10, y: 240 }, heights), []);
+  assert.deepEqual(nodesInRectangle(nodes, { x: -100, y: 10 }, { x: 20, y: 10 }, heights), []);
+  assert.deepEqual(nodesInRectangle([], { x: 0, y: 0 }, { x: 300, y: 200 }), []);
+});
+
+test('group dragging preserves the requested movement away from model bounds without mutating cards', () => {
+  const nodes = [{ id: 'a', x: -100, y: 120 }, { id: 'b', x: 300, y: -80 }];
+  const before = structuredClone(nodes);
+  assert.deepEqual(groupDragDelta(nodes, 123.75, -200.5), { x: 123.75, y: -200.5 });
+  assert.deepEqual(nodes, before);
+  assert.deepEqual(groupDragDelta([], 500, -500), { x: 0, y: 0 });
+});
+
+test('group dragging stops all cards at the first positive or negative boundary', () => {
+  const limit = LIMITS.coordinate;
+  const nodes = [
+    { id: 'a', x: limit - 15, y: -limit + 25 },
+    { id: 'b', x: limit - 215, y: -limit + 125 }
+  ];
+  assert.deepEqual(groupDragDelta(nodes, 300, -400), { x: 15, y: -25 });
+  const moved = nodes.map((node) => ({ ...node, x: node.x + 15, y: node.y - 25 }));
+  assert.equal(moved[0].x, limit);
+  assert.equal(moved[0].y, -limit);
+  assert.equal(moved[0].x - moved[1].x, nodes[0].x - nodes[1].x);
+  assert.equal(moved[0].y - moved[1].y, nodes[0].y - nodes[1].y);
+  assert.deepEqual(groupDragDelta(moved, 50, -50), { x: 0, y: 0 });
+  assert.deepEqual(groupDragDelta(moved, -50, 50), { x: -50, y: 50 });
+  assert.deepEqual(groupDragDelta([
+    { id: 'a', x: -limit + 8, y: limit - 12 },
+    { id: 'b', x: -limit + 108, y: limit - 112 }
+  ], -300, 400), { x: -8, y: 12 });
+});
+
+test('groups spanning both coordinate boundaries cannot move on that axis', () => {
+  const limit = LIMITS.coordinate;
+  const nodes = [{ id: 'a', x: -limit, y: -5 }, { id: 'b', x: limit, y: 5 }];
+  assert.deepEqual(groupDragDelta(nodes, -20, 15), { x: 0, y: 15 });
+  assert.deepEqual(groupDragDelta(nodes, 20, -15), { x: 0, y: -15 });
 });
 
 test('direction keys move by card positions across a freely arranged canvas', () => {

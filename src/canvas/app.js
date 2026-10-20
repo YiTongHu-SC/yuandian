@@ -32,6 +32,9 @@ import {
   worldPoint as clientToWorld,
   connectionCurve,
   directionalNode,
+  rectangleBetween,
+  nodesInRectangle,
+  groupDragDelta,
   NODE_WIDTH,
   NODE_HEIGHT
 } from './geometry.js';
@@ -75,6 +78,8 @@ let corrupt = loaded.status === 'invalid',
   dragging = null,
   connecting = false,
   connectFrom = null;
+let marqueeMode = false,
+  spaceHeld = false;
 let stage,
   world,
   svg,
@@ -93,6 +98,15 @@ const activeNode = () =>
   board()?.nodes.find(
     (n) => n.id === selection?.id && selection.kind === 'node'
   );
+const selectedNodeIds = () =>
+  selection?.kind === 'nodes'
+    ? selection.ids
+    : selection?.kind === 'node' ? [selection.id] : [];
+function selectNodes(ids) {
+  selection = ids.length > 1
+    ? { kind: 'nodes', ids }
+    : ids.length ? { kind: 'node', id: ids[0] } : null;
+}
 const snapshot = () => snapshotBoard(board());
 function note(text, action, label = '撤销') {
   clearTimeout(toastTimer);
@@ -140,6 +154,10 @@ function flush() {
   clearTimeout(saveTimer);
   const perform = () => {
     if (!dirty || corrupt || conflict) return false;
+    if (dragging) {
+      saveTimer = setTimeout(flush, 350);
+      return false;
+    }
     let raw;
     try {
       raw = storage.getItem(CANVAS_KEY);
@@ -435,6 +453,18 @@ function build() {
     'div',
     { class: 'toolbar', 'aria-label': '画布操作' },
     button('＋ 卡片', () => addIdea(), 'primary', { 'aria-label': '新增卡片' }),
+    button('框选', () => {
+      finishEdit();
+      closeMenus();
+      cancelConnect();
+      marqueeMode = !marqueeMode;
+      updateTools();
+      stage.focus();
+    }, '', {
+      id: 'marquee-toggle',
+      'aria-pressed': 'false',
+      title: '框选多张卡片后整体移动；也可 Shift + 拖动空白'
+    }),
     button('↶', () => undo(), '', {
       id: 'undo',
       title: '撤销 Ctrl / ⌘ Z',
@@ -570,6 +600,7 @@ function build() {
   showRecovery();
 }
 function renderBoard() {
+  cancelDrag();
   editing = null;
   nodeEls = new Map();
   nodesLayer.replaceChildren();
@@ -595,7 +626,8 @@ function renderBoard() {
         },
         onFocus: (e) => {
           if (e.target !== e.currentTarget) return;
-          selection = { kind: 'node', id: n.id };
+          if (!selectedNodeIds().includes(n.id))
+            selection = { kind: 'node', id: n.id };
           updateTools();
           renderEdges();
         }
@@ -690,6 +722,14 @@ function positionTools() {
   let anchor;
   if (selection.kind === 'node') {
     anchor = nodeEls.get(selection.id)?.getBoundingClientRect();
+  } else if (selection.kind === 'nodes') {
+    const bounds = selection.ids.map((id) => nodeEls.get(id)?.getBoundingClientRect()).filter(Boolean);
+    if (bounds.length) anchor = {
+      left: Math.min(...bounds.map((r) => r.left)),
+      right: Math.max(...bounds.map((r) => r.right)),
+      top: Math.min(...bounds.map((r) => r.top)),
+      bottom: Math.max(...bounds.map((r) => r.bottom))
+    };
   } else {
     const path = [...svg.querySelectorAll('[data-edge-id]')].find(
       (el) => el.dataset.edgeId === selection.id
@@ -786,19 +826,23 @@ function updateTools() {
   ])
     $('#' + id).disabled = !enabled;
   stage.classList.toggle('connecting', connecting);
+  stage.classList.toggle('marquee-mode', marqueeMode && !spaceHeld);
+  $('#marquee-toggle').classList.toggle('active', marqueeMode);
+  $('#marquee-toggle').setAttribute('aria-pressed', String(marqueeMode));
+  const selectedIds = new Set(selectedNodeIds());
   nodeEls.forEach((el, id) => {
     el.classList.toggle(
       'selected',
-      selection?.kind === 'node' && selection.id === id
+      selectedIds.has(id)
     );
     el.classList.toggle('connection-source', connecting && connectFrom === id);
   });
   const tools = $('#selection-tools');
-  const key = `${board().id}:${selection?.kind}:${selection?.id}`;
+  const key = `${board().id}:${selection?.kind}:${selection?.id || selection?.ids?.join(',')}`;
   if (key !== toolsSelection) cardMenuOpen = false;
   toolsSelection = key;
-  tools.classList.toggle('hidden', !selected || connecting);
-  tools.setAttribute('aria-label', n ? '所选卡片操作' : '所选连线操作');
+  tools.classList.toggle('hidden', !selected || connecting || dragging?.kind === 'marquee');
+  tools.setAttribute('aria-label', selection?.kind === 'nodes' ? '多张卡片选择' : n ? '所选卡片操作' : '所选连线操作');
   tools.replaceChildren();
   if (n) {
     tools.append(
@@ -871,6 +915,15 @@ function updateTools() {
           { 'aria-label': '删除卡片' }
         )
       )
+    );
+  } else if (selection?.kind === 'nodes') {
+    tools.append(
+      h('span', { class: 'selection-summary', role: 'status' }, `已选 ${selection.ids.length} 张 · 拖动任一卡片移动`),
+      button('取消选择', () => {
+        selection = null;
+        updateTools();
+        stage.focus();
+      }, 'small')
     );
   } else if (selected)
     tools.append(
@@ -1143,7 +1196,7 @@ function finishEdit() {
 function removeSelected() {
   finishEdit();
   closeMenus();
-  if (!selection) return;
+  if (!selection || selection.kind === 'nodes') return;
   const before = snapshot();
   if (selection.kind === 'node') deleteNode(board(), selection.id);
   else board().edges = board().edges.filter((e) => e.id !== selection.id);
@@ -1200,20 +1253,55 @@ function fitAll() {
   applyView();
   markDirty();
 }
+function clearDrag() {
+  const old = dragging;
+  dragging = null;
+  stage.classList.remove('panning', 'dragging', 'selecting');
+  stage.querySelector('.marquee')?.remove();
+  if (old?.capture.hasPointerCapture(old.pointerId))
+    old.capture.releasePointerCapture(old.pointerId);
+  return old;
+}
+function cancelDrag() {
+  if (!dragging) return;
+  const old = clearDrag(),
+    b = workspace.boards.find((item) => item.id === old.boardId);
+  if (b && old.kind === 'node') {
+    for (const origin of old.nodes) {
+      const n = b.nodes.find((item) => item.id === origin.id);
+      if (n) Object.assign(n, { x: origin.x, y: origin.y });
+      const el = nodeEls.get(origin.id);
+      if (el) {
+        el.style.left = `${origin.x}px`;
+        el.style.top = `${origin.y}px`;
+      }
+    }
+  } else if (b && old.kind === 'pan') {
+    b.view.x = old.nx;
+    b.view.y = old.ny;
+    if (b.id === board().id) applyView();
+  } else if (old.kind === 'marquee') selection = old.selection;
+  // Resume saving any earlier edits with the restored positions.
+  if (old.changed && old.kind !== 'marquee') markDirty();
+  updateTools();
+  renderEdges();
+}
 function bindCanvas() {
   stage.addEventListener('pointerdown', (e) => {
+    if (dragging) return;
     if (e.button !== 0 && e.button !== 1) return;
     if (e.target.closest('button,textarea')) return;
     finishEdit();
     $('.help-pop')?.remove();
     const idea = e.target.closest('.idea'),
-      edge = e.target.closest('[data-edge-id]');
-    if (connecting && idea) {
+      edge = e.target.closest('[data-edge-id]'),
+      pan = e.button === 1 || spaceHeld;
+    if (connecting && idea && !pan) {
       e.preventDefault();
       linkTo(idea.dataset.nodeId);
       return;
     }
-    if (edge) {
+    if (edge && !pan) {
       selection = {
         kind: 'edge',
         id: edge.dataset.edgeId,
@@ -1223,72 +1311,105 @@ function bindCanvas() {
       renderEdges();
       return;
     }
-    if (idea) {
-      selection = { kind: 'node', id: idea.dataset.nodeId };
+    e.preventDefault();
+    if (idea && !pan) {
+      if (!selectedNodeIds().includes(idea.dataset.nodeId))
+        selection = { kind: 'node', id: idea.dataset.nodeId };
       updateTools();
-      const n = activeNode();
+      const ids = new Set(selectedNodeIds());
       dragging = {
         kind: 'node',
-        id: n.id,
-        x: e.clientX,
-        y: e.clientY,
-        nx: n.x,
-        ny: n.y,
-        before: snapshot(),
-        changed: false
+        nodes: board().nodes.filter((n) => ids.has(n.id)).map(({ id, x, y }) => ({ id, x, y })),
+        before: snapshot()
       };
-    } else {
+    } else if (!pan && (marqueeMode || e.shiftKey)) {
+      cancelConnect();
+      dragging = {
+        kind: 'marquee',
+        start: worldPoint(e.clientX, e.clientY),
+        selection
+      };
       selection = null;
-      updateTools();
+      stage.append(h('div', { class: 'marquee', 'aria-hidden': 'true' }));
+    } else {
+      if (!pan) selection = null;
       dragging = {
         kind: 'pan',
-        x: e.clientX,
-        y: e.clientY,
         nx: board().view.x,
-        ny: board().view.y,
-        changed: false
+        ny: board().view.y
       };
     }
-    dragging.capture = idea || stage;
+    Object.assign(dragging, {
+      x: e.clientX,
+      y: e.clientY,
+      scale: board().view.scale,
+      boardId: board().id,
+      pointerId: e.pointerId,
+      changed: false,
+      capture: idea || stage
+    });
     dragging.capture.setPointerCapture(e.pointerId);
+    updateTools();
+    renderEdges();
     stage.focus();
   });
-  stage.addEventListener('pointermove', (e) => {
-    if (!dragging) return;
+  const move = (e) => {
+    if (!dragging || e.pointerId !== dragging.pointerId) return;
     const dx = e.clientX - dragging.x,
       dy = e.clientY - dragging.y;
     if (!dragging.changed && Math.hypot(dx, dy) < 5) return;
     dragging.changed = true;
-    stage.classList.add(dragging.kind === 'pan' ? 'panning' : 'dragging');
+    stage.classList.add(dragging.kind === 'pan' ? 'panning' : dragging.kind === 'marquee' ? 'selecting' : 'dragging');
     if (dragging.kind === 'node') {
-      const n = board().nodes.find((x) => x.id === dragging.id);
-      if (!n) return;
-      n.x = xy(dragging.nx + dx / board().view.scale);
-      n.y = xy(dragging.ny + dy / board().view.scale);
-      const el = nodeEls.get(n.id);
-      el.style.left = `${n.x}px`;
-      el.style.top = `${n.y}px`;
+      const delta = groupDragDelta(dragging.nodes, dx / dragging.scale, dy / dragging.scale);
+      for (const origin of dragging.nodes) {
+        const n = board().nodes.find((item) => item.id === origin.id);
+        if (!n) continue;
+        n.x = origin.x + delta.x;
+        n.y = origin.y + delta.y;
+        const el = nodeEls.get(n.id);
+        el.style.left = `${n.x}px`;
+        el.style.top = `${n.y}px`;
+      }
       renderEdges();
+    } else if (dragging.kind === 'marquee') {
+      const end = worldPoint(e.clientX, e.clientY),
+        r = rectangleBetween(dragging.start, end),
+        v = board().view;
+      Object.assign(stage.querySelector('.marquee').style, {
+        left: `${r.left * v.scale + v.x}px`,
+        top: `${r.top * v.scale + v.y}px`,
+        width: `${(r.right - r.left) * v.scale}px`,
+        height: `${(r.bottom - r.top) * v.scale}px`
+      });
+      selectNodes(nodesInRectangle(board().nodes, dragging.start, end,
+        new Map([...nodeEls].map(([id, el]) => [id, el.offsetHeight]))));
+      updateTools();
     } else {
       board().view.x = xy(dragging.nx + dx);
       board().view.y = xy(dragging.ny + dy);
       applyView();
     }
-  });
+  };
+  stage.addEventListener('pointermove', move);
   const end = (e) => {
-    if (!dragging) return;
-    const capture = dragging.capture;
-    if (dragging.changed) {
-      if (dragging.kind === 'node') pushHistory(dragging.before);
-      markDirty();
+    if (!dragging || e.pointerId !== dragging.pointerId) return;
+    move(e);
+    const old = clearDrag();
+    if (old.changed) {
+      if (old.kind === 'node' && snapshot() !== old.before) {
+        pushHistory(old.before);
+        markDirty();
+      } else if (old.kind === 'pan' && (board().view.x !== old.nx || board().view.y !== old.ny)) markDirty();
     }
-    dragging = null;
-    stage.classList.remove('panning', 'dragging');
-    if (capture?.hasPointerCapture(e.pointerId))
-      capture.releasePointerCapture(e.pointerId);
+    updateTools();
   };
   stage.addEventListener('pointerup', end);
-  stage.addEventListener('pointercancel', end);
+  const cancel = (e) => {
+    if (e.pointerId === dragging?.pointerId) cancelDrag();
+  };
+  stage.addEventListener('pointercancel', cancel);
+  stage.addEventListener('lostpointercapture', cancel);
   stage.addEventListener('dblclick', (e) => {
     if (!e.target.closest('.idea,[data-edge-id]') && !connecting) {
       e.preventDefault();
@@ -1300,6 +1421,7 @@ function bindCanvas() {
     (e) => {
       if (e.target.closest('textarea,.idea-text')) return;
       e.preventDefault();
+      if (dragging) return;
       if (e.ctrlKey || e.metaKey)
         zoomAt(Math.exp(-e.deltaY * 0.002), { x: e.clientX, y: e.clientY });
       else {
@@ -1578,6 +1700,7 @@ function toggleHelp() {
       {},
       '点卡片旁的“⋯”换色或删除。拖动空白处平移；Ctrl / ⌘ + 滚轮缩放，“显示全部”找回卡片。'
     ),
+    h('p', {}, '点顶部“框选”，或按住 Shift 拖动空白，框选多张卡片；拖动任一所选卡片整体移动，一次撤销。点空白或 Esc 取消多选；框选模式下可按住空格或用中键拖动平移。'),
     h('p', {}, '点击顶部画布名称改名；旁边菜单可切换、新建或删除画布。'),
     h(
       'p',
@@ -1669,6 +1792,12 @@ document.addEventListener('keydown', (e) => {
   );
   if (e.key === 'Escape') {
     e.preventDefault();
+    if (dragging) {
+      cancelDrag();
+      return;
+    }
+    if (selection?.kind === 'nodes') selection = null;
+    marqueeMode = false;
     const focusBack = !$('#file-menu').hidden
       ? '#file-menu-toggle'
       : !$('#board-menu').hidden
@@ -1693,6 +1822,16 @@ document.addEventListener('keydown', (e) => {
     (mcpPanel?.root && !mcpPanel.root.hidden && e.target === document.body)
   )
     return;
+  if (dragging) {
+    e.preventDefault();
+    return;
+  }
+  if (e.code === 'Space' && (e.target === stage || e.target.closest('.idea'))) {
+    e.preventDefault();
+    spaceHeld = true;
+    updateTools();
+    return;
+  }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
     e.preventDefault();
     undo(e.shiftKey);
@@ -1700,7 +1839,7 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     undo(true);
   } else if (e.key === 'Delete' || e.key === 'Backspace') {
-    if (selection) {
+    if (selection && selection.kind !== 'nodes') {
       e.preventDefault();
       removeSelected();
     }
@@ -1726,6 +1865,17 @@ document.addEventListener('keydown', (e) => {
       beginEdit(activeNode().id);
     }
   }
+});
+document.addEventListener('keyup', (e) => {
+  if (e.code === 'Space' && spaceHeld) {
+    spaceHeld = false;
+    updateTools();
+  }
+});
+window.addEventListener('blur', () => {
+  spaceHeld = false;
+  cancelDrag();
+  updateTools();
 });
 window.addEventListener('storage', (e) => {
   if (e.key !== CANVAS_KEY || e.newValue === savedRaw) return;

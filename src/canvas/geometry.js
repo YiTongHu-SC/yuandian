@@ -15,6 +15,41 @@ export function worldPoint(view, rect, clientX, clientY) {
   };
 }
 
+export function rectangleBetween(start, end) {
+  return {
+    left: Math.min(start.x, end.x),
+    top: Math.min(start.y, end.y),
+    right: Math.max(start.x, end.x),
+    bottom: Math.max(start.y, end.y)
+  };
+}
+
+/** A card is selected when any visible area intersects the world-space rectangle. */
+export function nodesInRectangle(nodes, start, end, heights = new Map()) {
+  const rect = rectangleBetween(start, end);
+  if (rect.left === rect.right || rect.top === rect.bottom) return [];
+  return nodes.filter((node) =>
+    node.x < rect.right && node.x + NODE_WIDTH > rect.left &&
+    node.y < rect.bottom && node.y + (heights.get(node.id) || NODE_HEIGHT) > rect.top
+  ).map((node) => node.id);
+}
+
+/** Limit the shared movement once so every card keeps its position within the group. */
+export function groupDragDelta(nodes, dx, dy) {
+  if (!nodes.length) return { x: 0, y: 0 };
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const node of nodes) {
+    minX = Math.min(minX, node.x);
+    minY = Math.min(minY, node.y);
+    maxX = Math.max(maxX, node.x);
+    maxY = Math.max(maxY, node.y);
+  }
+  return {
+    x: clamp(dx, -LIMITS.coordinate - minX, LIMITS.coordinate - maxX),
+    y: clamp(dy, -LIMITS.coordinate - minY, LIMITS.coordinate - maxY)
+  };
+}
+
 /** Move through freely placed cards using measured centers and directional alignment. */
 export function directionalNode(nodes, currentId, key, heights = new Map()) {
   const direction = {
